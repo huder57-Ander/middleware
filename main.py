@@ -7,10 +7,7 @@ from fastapi import FastAPI
 app = FastAPI(title="Tele2 - MoySklad Middleware")
 
 # --- КОНФИГУРАЦИЯ ---
-# Автоматическая очистка URL от лишних слэшей и пробелов
-raw_url = os.getenv("TELE2_API_URL", "https://ats2.tele2.ru/crm/openapi").strip().strip("[]'\"")
-TELE2_API_URL = raw_url.rstrip("/")
-
+TELE2_API_URL = os.getenv("TELE2_API_URL", "https://ats2.tele2.ru/crm/openapi").strip().strip("[]'\"").rstrip("/")
 TELE2_ACCESS_TOKEN = os.getenv("TELE2_ACCESS_TOKEN", "").strip()
 TELE2_REFRESH_TOKEN = os.getenv("TELE2_REFRESH_TOKEN", "").strip()
 
@@ -20,7 +17,6 @@ MOYSKLAD_TOKEN = os.getenv("MOYSKLAD_TOKEN", "").strip()
 processed_calls = set()
 
 def get_t2_headers(token: str):
-    """Форматирование заголовка под спецификацию КАТС T2"""
     clean_token = token.replace("Bearer ", "").strip()
     return {
         "Authorization": clean_token,
@@ -28,7 +24,10 @@ def get_t2_headers(token: str):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
 
-# --- ФУНКЦИИ ВЗАИМОДЕЙСТВИЯ С КАТС T2 С FOLLOW REDIRECTS ---
+# Создаем единую постоянную HTTP/2 сессию для обхода фильтров Nginx
+t2_client = httpx.Client(http2=True, follow_redirects=True, timeout=12.0)
+
+# --- ФУНКЦИИ ВЗАИМОДЕЙСТВИЯ С КАТС T2 ---
 
 def refresh_tele2_token():
     """Обновление просроченного Access Token через Refresh Token"""
@@ -37,17 +36,15 @@ def refresh_tele2_token():
     headers = get_t2_headers(TELE2_REFRESH_TOKEN)
     
     try:
-        # Добавлен параметр follow_redirects=True
-        with httpx.Client(http2=True, follow_redirects=True, timeout=10.0) as client:
-            response = client.put(url, headers=headers)
-            if response.status_code == 200:
-                data = response.json()
-                TELE2_ACCESS_TOKEN = data.get("accessToken", TELE2_ACCESS_TOKEN)
-                print("🟢 Access Token T2 успешно обновлен!")
-                return True
-            else:
-                print(f"🔴 Ошибка обновления токена T2: Status {response.status_code}, Body: {response.text}")
-                return False
+        response = t2_client.put(url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            TELE2_ACCESS_TOKEN = data.get("accessToken", TELE2_ACCESS_TOKEN)
+            print("🟢 Access Token T2 успешно обновлен!")
+            return True
+        else:
+            print(f"🔴 Ошибка обновления токена T2: Status {response.status_code}, Body: {response.text[:150]}")
+            return False
     except Exception as e:
         print(f"🔴 Исключение при обновлении токена T2: {e}")
         return False
@@ -60,22 +57,20 @@ def get_active_calls():
     headers = get_t2_headers(TELE2_ACCESS_TOKEN)
 
     try:
-        # Добавлен параметр follow_redirects=True
-        with httpx.Client(http2=True, follow_redirects=True, timeout=10.0) as client:
-            response = client.get(url, headers=headers)
-            
-            # Если токен просрочен (401 или 403)
-            if response.status_code in (401, 403):
-                print("⚠️ Access Token просрочен или недействителен. Пробуем обновить...")
-                if refresh_tele2_token():
-                    headers = get_t2_headers(TELE2_ACCESS_TOKEN)
-                    response = client.get(url, headers=headers)
+        response = t2_client.get(url, headers=headers)
+        
+        # Если токен просрочен (401 или 403)
+        if response.status_code in (401, 403):
+            print("⚠️ Access Token просрочен или недействителен. Пробуем обновить...")
+            if refresh_tele2_token():
+                headers = get_t2_headers(TELE2_ACCESS_TOKEN)
+                response = t2_client.get(url, headers=headers)
 
-            if response.status_code == 200:
-                return response.json()
-            else:
-                print(f"⚠️ Ошибка получения звонков: Status {response.status_code} | Ответ: {response.text[:150]}")
-                return []
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"⚠️ Ошибка получения звонков: Status {response.status_code} | Ответ: {response.text[:150]}")
+            return []
     except Exception as e:
         print(f"🔴 Ошибка сети при запросе к T2: {e}")
         return []
