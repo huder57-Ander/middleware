@@ -146,3 +146,48 @@ def moysklad_webhook():
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+# --- ИСХОДЯЩИЕ ВЫЗОВЫ ИЗ МОЕГОСКЛАДА ---
+
+@app.post("/api/make-call")
+def make_outgoing_call(payload: dict):
+    """
+    Принимает запрос от МоегоСклада и инициирует исходящий вызов через КАТС T2.
+    Ожидаемый JSON: {"phone": "79XXXXXXXXX", "user": "101"}
+    """
+    global TELE2_ACCESS_TOKEN
+    target_phone = payload.get("phone")
+    user_extension = payload.get("user")  # Короткий добавочный номер сотрудника в КАТС T2
+
+    if not target_phone:
+        return {"status": "error", "message": "Не указан номер телефона"}, 400
+
+    # Очистка номера от лишних символов (пробелы, тире, плюсы)
+    clean_phone = "".join(filter(str.isdigit, str(target_phone)))
+
+    url = f"{TELE2_API_URL}/calls/outgoing"
+    headers = get_t2_headers(TELE2_ACCESS_TOKEN)
+    body = {
+        "phone": clean_phone,
+        "user": user_extension
+    }
+
+    try:
+        response = t2_client.post(url, headers=headers, json=body)
+
+        # Если токен истек, пробуем обновить
+        if response.status_code in (401, 403):
+            if refresh_tele2_token():
+                headers = get_t2_headers(TELE2_ACCESS_TOKEN)
+                response = t2_client.post(url, headers=headers, json=body)
+
+        if response.status_code in (200, 201, 202):
+            print(f"📞 Инициирован исходящий звонок сотрудником {user_extension} на номер {clean_phone}")
+            return {"status": "success", "data": response.json()}
+        else:
+            print(f"🔴 Ошибка создания вызова T2: Status {response.status_code} | Ответ: {response.text}")
+            return {"status": "error", "code": response.status_code, "detail": response.text}, 400
+
+    except Exception as e:
+        print(f"🔴 Исключение при отправке исходящего вызова: {e}")
+        return {"status": "error", "detail": str(e)}, 500
