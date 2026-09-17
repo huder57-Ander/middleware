@@ -7,7 +7,10 @@ from fastapi import FastAPI
 app = FastAPI(title="Tele2 - MoySklad Middleware")
 
 # --- КОНФИГУРАЦИЯ ---
-TELE2_API_URL = os.getenv("TELE2_API_URL", "https://ats2.tele2.ru/crm/openapi").strip().rstrip("/")
+# Автоматическая очистка URL от лишних слэшей и пробелов
+raw_url = os.getenv("TELE2_API_URL", "https://ats2.tele2.ru/crm/openapi").strip().strip("[]'\"")
+TELE2_API_URL = raw_url.rstrip("/")
+
 TELE2_ACCESS_TOKEN = os.getenv("TELE2_ACCESS_TOKEN", "").strip()
 TELE2_REFRESH_TOKEN = os.getenv("TELE2_REFRESH_TOKEN", "").strip()
 
@@ -17,7 +20,7 @@ MOYSKLAD_TOKEN = os.getenv("MOYSKLAD_TOKEN", "").strip()
 processed_calls = set()
 
 def get_t2_headers(token: str):
-    """Форматирование заголовка строго по спецификации КАТС T2"""
+    """Форматирование заголовка под спецификацию КАТС T2"""
     clean_token = token.replace("Bearer ", "").strip()
     return {
         "Authorization": clean_token,
@@ -25,7 +28,7 @@ def get_t2_headers(token: str):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
 
-# --- ФУНКЦИИ ВЗАИМОДЕЙСТВИЯ С КАТС T2 С ПОДДЕРЖКОЙ HTTP/2 ---
+# --- ФУНКЦИИ ВЗАИМОДЕЙСТВИЯ С КАТС T2 С FOLLOW REDIRECTS ---
 
 def refresh_tele2_token():
     """Обновление просроченного Access Token через Refresh Token"""
@@ -34,7 +37,8 @@ def refresh_tele2_token():
     headers = get_t2_headers(TELE2_REFRESH_TOKEN)
     
     try:
-        with httpx.Client(http2=True, timeout=10.0) as client:
+        # Добавлен параметр follow_redirects=True
+        with httpx.Client(http2=True, follow_redirects=True, timeout=10.0) as client:
             response = client.put(url, headers=headers)
             if response.status_code == 200:
                 data = response.json()
@@ -56,8 +60,8 @@ def get_active_calls():
     headers = get_t2_headers(TELE2_ACCESS_TOKEN)
 
     try:
-        # HTTP/2 клиент обходит большинство правил блокировки Nginx
-        with httpx.Client(http2=True, timeout=10.0) as client:
+        # Добавлен параметр follow_redirects=True
+        with httpx.Client(http2=True, follow_redirects=True, timeout=10.0) as client:
             response = client.get(url, headers=headers)
             
             # Если токен просрочен (401 или 403)
@@ -104,7 +108,7 @@ def send_to_moysklad(call_data):
     }
 
     try:
-        with httpx.Client(timeout=10.0) as client:
+        with httpx.Client(follow_redirects=True, timeout=10.0) as client:
             response = client.get(url, headers=headers)
             if response.status_code == 200:
                 data = response.json()
