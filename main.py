@@ -7,7 +7,7 @@ from fastapi import FastAPI
 app = FastAPI(title="Tele2 - MoySklad Middleware")
 
 # --- КОНФИГУРАЦИЯ ---
-TELE2_API_URL = os.getenv("TELE2_API_URL", "https://ats2.tele2.ru/crm/openapi").strip()
+TELE2_API_URL = os.getenv("TELE2_API_URL", "https://ats2.tele2.ru/crm/openapi").strip().rstrip("/")
 TELE2_ACCESS_TOKEN = os.getenv("TELE2_ACCESS_TOKEN", "").strip()
 TELE2_REFRESH_TOKEN = os.getenv("TELE2_REFRESH_TOKEN", "").strip()
 
@@ -17,11 +17,14 @@ MOYSKLAD_TOKEN = os.getenv("MOYSKLAD_TOKEN", "").strip()
 processed_calls = set()
 
 def get_t2_headers(token: str):
-    """Строгие заголовки для прохождения через Nginx Tele2"""
+    """Заголовки с полным обходом защиты Nginx"""
     clean_token = token.replace("Bearer ", "").strip()
     return {
-        "authorization": clean_token,
-        "accept": "*/*"
+        "Authorization": clean_token,
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Connection": "keep-alive"
     }
 
 # --- ФУНКЦИИ ВЗАИМОДЕЙСТВИЯ С КАТС T2 ---
@@ -56,7 +59,7 @@ def get_active_calls():
     try:
         response = requests.get(url, headers=headers, timeout=10)
         
-        # Если токен просрочен (401 или 403)
+        # Если токен истек (401 или 403)
         if response.status_code in (401, 403):
             print("⚠️ Access Token просрочен или недействителен. Пробуем обновить...")
             if refresh_tele2_token():
@@ -66,7 +69,7 @@ def get_active_calls():
         if response.status_code == 200:
             return response.json()
         else:
-            print(f"⚠️ Ошибка получения звонков: Status {response.status_code} | Ответ: {response.text}")
+            print(f"⚠️ Ошибка получения звонков: Status {response.status_code} | Ответ: {response.text[:200]}")
             return []
     except Exception as e:
         print(f"🔴 Ошибка сети при запросе к T2: {e}")
