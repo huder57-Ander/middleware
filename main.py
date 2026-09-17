@@ -2,7 +2,7 @@ import os
 import time
 import threading
 import requests
-from fastapi import FastAPI, BackgroundTasks, Request
+from fastapi import FastAPI
 
 app = FastAPI(title="Tele2 - MoySklad Middleware")
 
@@ -14,7 +14,6 @@ TELE2_REFRESH_TOKEN = os.getenv("TELE2_REFRESH_TOKEN", "")
 MOYSKLAD_API_URL = "https://api.moysklad.ru/api/remap/1.2"
 MOYSKLAD_TOKEN = os.getenv("MOYSKLAD_TOKEN", "")
 
-# Множество для отслеживания уже обработанных звонков (чтобы не дублировать)
 processed_calls = set()
 
 # --- ФУНКЦИИ ВЗАИМОДЕЙСТВИЯ С КАТС T2 ---
@@ -23,10 +22,13 @@ def refresh_tele2_token():
     """Обновление просроченного Access Token через Refresh Token"""
     global TELE2_ACCESS_TOKEN
     url = f"{TELE2_API_URL}/authorization/refresh/token"
-    headers = {"Authorization": TELE2_REFRESH_TOKEN}
+    headers = {
+        "Authorization": TELE2_REFRESH_TOKEN,
+        "Accept": "application/json"
+    }
     
     try:
-        response = requests.put(url, headers=headers, timeout=5)
+        response = requests.put(url, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
             TELE2_ACCESS_TOKEN = data.get("accessToken", TELE2_ACCESS_TOKEN)
@@ -44,21 +46,24 @@ def get_active_calls():
     """Запрос активных звонков из КАТС T2 (GET /monitoring/calls)"""
     global TELE2_ACCESS_TOKEN
     url = f"{TELE2_API_URL}/monitoring/calls"
-    headers = {"Authorization": TELE2_ACCESS_TOKEN}
+    headers = {
+        "Authorization": TELE2_ACCESS_TOKEN,
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0"
+    }
 
     try:
-        response = requests.get(url, headers=headers, timeout=5)
+        response = requests.get(url, headers=headers, timeout=10)
         
-        # Если токен истек (401 или 403), пробуем обновить
+        # Если токен истек (401 или 403)
         if response.status_code in (401, 403):
             print("⚠️ Access Token просрочен. Обновляем...")
             if refresh_tele2_token():
                 headers["Authorization"] = TELE2_ACCESS_TOKEN
-                response = requests.get(url, headers=headers, timeout=5)
+                response = requests.get(url, headers=headers, timeout=10)
 
         if response.status_code == 200:
-            calls = response.json()
-            return calls
+            return response.json()
         else:
             print(f"⚠️ Ошибка получения звонков: Status {response.status_code}")
             return []
@@ -79,7 +84,6 @@ def send_to_moysklad(call_data):
     print(f"📞 Обработка входящего вызова {call_id} от {caller_phone}...")
     processed_calls.add(call_id)
 
-    # Очистка старых ID (чтобы память не переполнялась)
     if len(processed_calls) > 500:
         processed_calls.clear()
 
@@ -87,15 +91,15 @@ def send_to_moysklad(call_data):
         print("⚠️ MOYSKLAD_TOKEN не задан в Environment Variables.")
         return
 
-    # Запрос поиска контрагента в МоемСкладе
     url = f"{MOYSKLAD_API_URL}/entity/counterparty?filter=phone={caller_phone}"
     headers = {
         "Authorization": f"Bearer {MOYSKLAD_TOKEN}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Accept": "application/json"
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=5)
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
             rows = data.get("rows", [])
@@ -109,10 +113,10 @@ def send_to_moysklad(call_data):
     except Exception as e:
         print(f"🔴 Ошибка отправки в МойСклад: {e}")
 
-# --- ФОНОВЫЙ ПРОЦЕСС ОПРОСА (POLLING LOOP) ---
+# --- ФОНОВЫЙ ПРОЦЕСС ОПРОСА ---
 
 def poll_tele2_loop():
-    """Фоновый цикл: запрашивает активные звонки каждые 2 секунды"""
+    """Фоновый цикл: запрашивает активные звонки каждые 3 секунды"""
     print("🚀 Запущен фоновый опрос КАТС T2...")
     while True:
         calls = get_active_calls()
@@ -120,16 +124,19 @@ def poll_tele2_loop():
             print(f"📲 Активные звонки в КАТС T2: {calls}")
             for call in calls:
                 send_to_moysklad(call)
-        time.sleep(2)
+        time.sleep(3)
 
-# Запуск фонового потока при старте сервера
 threading.Thread(target=poll_tele2_loop, daemon=True).start()
 
-# --- ЭНДПОИНТЫ ДЛЯ RENDER И ВЕБХУКОВ ---
+# --- ЭНДПОИНТЫ ДЛЯ RENDER И МОЕГОСКЛАДА ---
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def read_root():
     return {"status": "running", "service": "Tele2 - MoySklad Middleware"}
+
+@app.post("/api/moysklad")
+def moysklad_webhook():
+    return {"status": "received"}
 
 @app.get("/health")
 def health_check():
