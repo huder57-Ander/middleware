@@ -1,10 +1,17 @@
 import os
-import time
-import threading
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
 
-app = FastAPI(title="Tele2 - MoySklad Middleware")
+# Контекстный менеджер lifespan выполняется при старте и завершении приложения
+async def lifespan(app: FastAPI):
+    # --- СОБЫТИЕ ПРИ СТАРТЕ ПРИЛОЖЕНИЯ ---
+    print("🚀 Сервер запускается. Отправка запроса на регистрацию Webhook в Tele2...")
+    register_tele2_webhook()
+    yield
+    # --- СОБЫТИЕ ПРИ ОСТАНОВКЕ (если требуется) ---
+    print("🛑 Сервер останавливается...")
+
+app = FastAPI(title="Tele2 - MoySklad Middleware", lifespan=lifespan)
 
 # --- КОНФИГУРАЦИЯ ---
 TELE2_API_URL = os.getenv("TELE2_API_URL", "https://ats2.tele2.ru/crm/openapi").strip().strip("[]'\"").rstrip("/")
@@ -13,93 +20,79 @@ TELE2_REFRESH_TOKEN = os.getenv("TELE2_REFRESH_TOKEN", "").strip()
 
 MOYSKLAD_API_URL = "https://api.moysklad.ru/api/remap/1.2"
 MOYSKLAD_TOKEN = os.getenv("MOYSKLAD_TOKEN", "").strip()
+WEBHOOK_URL = "https://middleware-hudia.onrender.com/api/tele2/webhook"
 
 processed_calls = set()
+t2_client = httpx.Client(http2=True, follow_redirects=True, timeout=12.0)
 
 def get_t2_headers(token: str):
-    """Форматирование заголовков под защиту Nginx/WAF Tele2"""
     clean_token = token.replace("Bearer ", "").strip()
     return {
         "Authorization": clean_token,
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Cache-Control": "no-cache"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"
     }
 
-# Единый клиент с поддержкой HTTP/2, переходов по редиректам и куки-сессий
-t2_client = httpx.Client(http2=True, follow_redirects=True, timeout=12.0)
-
-# --- ФУНКЦИИ ВЗАИМОДЕЙСТВИЯ С КАТС T2 ---
-
 def refresh_tele2_token():
-    """Обновление просроченного Access Token через Refresh Token"""
     global TELE2_ACCESS_TOKEN
     url = f"{TELE2_API_URL}/authorization/refresh/token"
     headers = get_t2_headers(TELE2_REFRESH_TOKEN)
-    
     try:
         response = t2_client.put(url, headers=headers)
         if response.status_code == 200:
-            data = response.json()
-            TELE2_ACCESS_TOKEN = data.get("accessToken", TELE2_ACCESS_TOKEN)
+            TELE2_ACCESS_TOKEN = response.json().get("accessToken", TELE2_ACCESS_TOKEN)
             print("🟢 Access Token T2 успешно обновлен!")
             return True
-        else:
-            print(f"🔴 Ошибка обновления токена T2: Status {response.status_code}, Body: {response.text[:150]}")
-            return False
     except Exception as e:
-        print(f"🔴 Исключение при обновлении токена T2: {e}")
-        return False
+        print(f"🔴 Ошибка обновления токена: {e}")
+    return False
 
-
-def get_active_calls():
-    """Запрос активных звонков из КАТС T2 (GET /monitoring/calls)"""
-    global TELE2_ACCESS_TOKEN
-    url = f"{TELE2_API_URL}/monitoring/calls"
-    headers = get_t2_headers(TELE2_ACCESS_TOKEN)
-
-    try:
-        response = t2_client.get(url, headers=headers)
-        
-        # Если токен просрочен (401 или 403)
-        if response.status_code in (401, 403):
-            print("⚠️ Access Token просрочен или недействителен. Пробуем обновить...")
-            if refresh_tele2_token():
-                headers = get_t2_headers(TELE2_ACCESS_TOKEN)
-                response = t2_client.get(url, headers=headers)
-
-        if response.status_code == 200:
-            return response.json()
-        else:
-            print(f"⚠️ Ошибка получения звонков: Status {response.status_code} | Ответ: {response.text[:150]}")
-            return []
-    except Exception as e:
-        print(f"🔴 Ошибка сети при запросе к T2: {e}")
-        return []
-
-# --- ФУНКЦИИ ВЗАИМОДЕЙСТВИЯ С МОЙСКЛАД ---
-
-def send_to_moysklad(call_data):
-    """Поиск контрагента в МоемСкладе по номеру телефона"""
-    caller_phone = call_data.get("caller")
-    call_id = call_data.get("callId")
-
-    if not caller_phone or call_id in processed_calls:
+def register_tele2_webhook():
+    """Автоматическая регистрация Webhook при старте сервера"""
+    if not TELE2_ACCESS_TOKEN:
+        print("⚠️ TELE2_ACCESS_TOKEN не задан. Регистрация Webhook пропущена.")
         return
 
-    print(f"📞 Обработка входящего вызова {call_id} от {caller_phone}...")
-    processed_calls.add(call_id)
+    url = f"{TELE2_API_URL}/subscription/events"
+    headers = get_t2_headers(TELE2_ACCESS_TOKEN)
+    body = {
+        "url": WEBHOOK_URL,
+        "events": ["CALL_START", "CALL_END", "CALL_ANSWER"]
+    }
 
+    try:
+        res = t2_client.post(url, headers=headers, json=body)
+        
+        # Если токен истек при старте — обновляем и повторно подписываемся
+        if res.status_code in (401, 403):
+            if refresh_tele2_token():
+                headers = get_t2_headers(TELE2_ACCESS_TOKEN)
+                res = t2_client.post(url, headers=headers, json=body)
+
+        if res.status_code in (200, 201):
+            print(f"✅ Webhook успешно зарегистрирован в Tele2: {WEBHOOK_URL}")
+        else:
+            print(f"⚠️ Ошибка регистрации Webhook: Status {res.status_code} | {res.text[:150]}")
+    except Exception as e:
+        print(f"🔴 Исключение при подписке на Webhook: {e}")
+
+# --- ОБРАБОТКА ПОИСКА В МОЕМСКЛАДЕ ---
+
+def process_incoming_call_task(caller_phone: str, call_id: str):
+    if not caller_phone or call_id in processed_calls:
+        return
+    
+    processed_calls.add(call_id)
     if len(processed_calls) > 500:
         processed_calls.clear()
 
     if not MOYSKLAD_TOKEN:
-        print("⚠️ MOYSKLAD_TOKEN не задан в Environment Variables.")
+        print("⚠️ MOYSKLAD_TOKEN не задан!")
         return
 
-    url = f"{MOYSKLAD_API_URL}/entity/counterparty?filter=phone={caller_phone}"
+    clean_phone = "".join(filter(str.isdigit, str(caller_phone)))
+    url = f"{MOYSKLAD_API_URL}/entity/counterparty?filter=phone={clean_phone}"
     headers = {
         "Authorization": f"Bearer {MOYSKLAD_TOKEN}",
         "Content-Type": "application/json",
@@ -107,26 +100,42 @@ def send_to_moysklad(call_data):
     }
 
     try:
-        with httpx.Client(follow_redirects=True, timeout=10.0) as client:
-            response = client.get(url, headers=headers)
-            if response.status_code == 200:
-                data = response.json()
-                rows = data.get("rows", [])
+        with httpx.Client(timeout=10.0) as client:
+            res = client.get(url, headers=headers)
+            if res.status_code == 200:
+                rows = res.json().get("rows", [])
                 if rows:
-                    client_name = rows[0].get("name")
-                    print(f"✅ Найден клиент в МоемСкладе: {client_name} ({caller_phone})")
+                    print(f"✅ Найден клиент в МоемСкладе: {rows[0].get('name')} ({clean_phone})")
                 else:
-                    print(f"ℹ️ Клиент с номером {caller_phone} не найден в МоемСкладе.")
+                    print(f"ℹ️ Клиент {clean_phone} не найден в МоемСкладе.")
             else:
-                print(f"🔴 Ошибка МойСклад API: Status {response.status_code}")
+                print(f"🔴 Ошибка МойСклад API: {res.status_code}")
     except Exception as e:
-        print(f"🔴 Ошибка отправки в МойСклад: {e}")
+        print(f"🔴 Ошибка при поиске в МоемСкладе: {e}")
+
+# --- ЭНДПОИНТ ДЛЯ ВЕБХУКОВ ОТ TELE2 ---
+
+@app.post("/api/tele2/webhook")
+async def tele2_webhook(request: Request, background_tasks: BackgroundTasks):
+    try:
+        data = await request.json()
+        print(f"📥 Получен Webhook от Tele2: {data}")
+        
+        caller = data.get("caller") or data.get("from")
+        call_id = data.get("callId") or data.get("id")
+        
+        if caller and call_id:
+            background_tasks.add_task(process_incoming_call_task, caller, str(call_id))
+            
+        return {"status": "ok"}
+    except Exception as e:
+        print(f"⚠️ Ошибка обработки Webhook T2: {e}")
+        return {"status": "error"}, 400
 
 # --- ИСХОДЯЩИЕ ВЫЗОВЫ ---
 
 @app.post("/api/make-call")
 def make_outgoing_call(payload: dict):
-    """Инициализация исходящего вызова из МоегоСклада через Tele2"""
     global TELE2_ACCESS_TOKEN
     target_phone = payload.get("phone")
     user_extension = payload.get("user")
@@ -147,37 +156,18 @@ def make_outgoing_call(payload: dict):
                 response = t2_client.post(url, headers=headers, json=body)
 
         if response.status_code in (200, 201, 202):
-            print(f"📞 Инициирован исходящий звонок сотрудником {user_extension} на {clean_phone}")
+            print(f"📞 Инициирован исходящий звонок {user_extension} -> {clean_phone}")
             return {"status": "success", "data": response.json()}
         else:
             return {"status": "error", "code": response.status_code, "detail": response.text}, 400
     except Exception as e:
         return {"status": "error", "detail": str(e)}, 500
 
-# --- ФОНОВЫЙ ПРОЦЕСС ОПРОСА ---
-
-def poll_tele2_loop():
-    """Фоновый опрос КАТС T2 раз в 5 секунд для снижения нагрузки на Nginx"""
-    print("🚀 Запущен фоновый опрос КАТС T2...")
-    while True:
-        calls = get_active_calls()
-        if calls:
-            print(f"📲 Активные звонки в КАТС T2: {calls}")
-            for call in calls:
-                send_to_moysklad(call)
-        time.sleep(5)
-
-threading.Thread(target=poll_tele2_loop, daemon=True).start()
-
-# --- ЭНДПОИНТЫ ДЛЯ RENDER И ВЕБХУКОВ ---
+# --- СЛУЖЕБНЫЕ ЭНДПОИНТЫ ---
 
 @app.api_route("/", methods=["GET", "HEAD", "POST"])
 def read_root():
-    return {"status": "running", "service": "Tele2 - MoySklad Middleware"}
-
-@app.post("/api/moysklad")
-def moysklad_webhook():
-    return {"status": "received"}
+    return {"status": "running", "mode": "webhook"}
 
 @app.get("/health")
 def health_check():
