@@ -7,7 +7,7 @@ from fastapi import FastAPI
 app = FastAPI(title="Tele2 - MoySklad Middleware")
 
 # --- КОНФИГУРАЦИЯ ---
-TELE2_API_URL = os.getenv("TELE2_API_URL", "https://ats2.tele2.ru/crm/openapi")
+TELE2_API_URL = os.getenv("TELE2_API_URL", "https://ats2.tele2.ru/crm/openapi").strip()
 TELE2_ACCESS_TOKEN = os.getenv("TELE2_ACCESS_TOKEN", "").strip()
 TELE2_REFRESH_TOKEN = os.getenv("TELE2_REFRESH_TOKEN", "").strip()
 
@@ -17,14 +17,11 @@ MOYSKLAD_TOKEN = os.getenv("MOYSKLAD_TOKEN", "").strip()
 processed_calls = set()
 
 def get_t2_headers(token: str):
-    """Формирование заголовков строго по спецификации Tele2"""
-    # Очищаем токен от возможного префикса Bearer
+    """Строгие заголовки для прохождения через Nginx Tele2"""
     clean_token = token.replace("Bearer ", "").strip()
     return {
-        "Authorization": clean_token,
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        "authorization": clean_token,
+        "accept": "*/*"
     }
 
 # --- ФУНКЦИИ ВЗАИМОДЕЙСТВИЯ С КАТС T2 ---
@@ -59,7 +56,7 @@ def get_active_calls():
     try:
         response = requests.get(url, headers=headers, timeout=10)
         
-        # Если токен истек (401 или 403)
+        # Если токен просрочен (401 или 403)
         if response.status_code in (401, 403):
             print("⚠️ Access Token просрочен или недействителен. Пробуем обновить...")
             if refresh_tele2_token():
