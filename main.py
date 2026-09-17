@@ -6,15 +6,26 @@ from fastapi import FastAPI
 
 app = FastAPI(title="Tele2 - MoySklad Middleware")
 
-# --- КОНФИГУРАЦИЯ (Загрузка из переменной окружения Render) ---
+# --- КОНФИГУРАЦИЯ ---
 TELE2_API_URL = os.getenv("TELE2_API_URL", "https://ats2.tele2.ru/crm/openapi")
-TELE2_ACCESS_TOKEN = os.getenv("TELE2_ACCESS_TOKEN", "")
-TELE2_REFRESH_TOKEN = os.getenv("TELE2_REFRESH_TOKEN", "")
+TELE2_ACCESS_TOKEN = os.getenv("TELE2_ACCESS_TOKEN", "").strip()
+TELE2_REFRESH_TOKEN = os.getenv("TELE2_REFRESH_TOKEN", "").strip()
 
 MOYSKLAD_API_URL = "https://api.moysklad.ru/api/remap/1.2"
-MOYSKLAD_TOKEN = os.getenv("MOYSKLAD_TOKEN", "")
+MOYSKLAD_TOKEN = os.getenv("MOYSKLAD_TOKEN", "").strip()
 
 processed_calls = set()
+
+def get_t2_headers(token: str):
+    """Формирование заголовков строго по спецификации Tele2"""
+    # Очищаем токен от возможного префикса Bearer
+    clean_token = token.replace("Bearer ", "").strip()
+    return {
+        "Authorization": clean_token,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
 
 # --- ФУНКЦИИ ВЗАИМОДЕЙСТВИЯ С КАТС T2 ---
 
@@ -22,10 +33,7 @@ def refresh_tele2_token():
     """Обновление просроченного Access Token через Refresh Token"""
     global TELE2_ACCESS_TOKEN
     url = f"{TELE2_API_URL}/authorization/refresh/token"
-    headers = {
-        "Authorization": TELE2_REFRESH_TOKEN,
-        "Accept": "application/json"
-    }
+    headers = get_t2_headers(TELE2_REFRESH_TOKEN)
     
     try:
         response = requests.put(url, headers=headers, timeout=10)
@@ -35,7 +43,7 @@ def refresh_tele2_token():
             print("🟢 Access Token T2 успешно обновлен!")
             return True
         else:
-            print(f"🔴 Ошибка обновления токена T2: Status {response.status_code}, {response.text}")
+            print(f"🔴 Ошибка обновления токена T2: Status {response.status_code}, Body: {response.text}")
             return False
     except Exception as e:
         print(f"🔴 Исключение при обновлении токена T2: {e}")
@@ -46,26 +54,22 @@ def get_active_calls():
     """Запрос активных звонков из КАТС T2 (GET /monitoring/calls)"""
     global TELE2_ACCESS_TOKEN
     url = f"{TELE2_API_URL}/monitoring/calls"
-    headers = {
-        "Authorization": TELE2_ACCESS_TOKEN,
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0"
-    }
+    headers = get_t2_headers(TELE2_ACCESS_TOKEN)
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
         
         # Если токен истек (401 или 403)
         if response.status_code in (401, 403):
-            print("⚠️ Access Token просрочен. Обновляем...")
+            print("⚠️ Access Token просрочен или недействителен. Пробуем обновить...")
             if refresh_tele2_token():
-                headers["Authorization"] = TELE2_ACCESS_TOKEN
+                headers = get_t2_headers(TELE2_ACCESS_TOKEN)
                 response = requests.get(url, headers=headers, timeout=10)
 
         if response.status_code == 200:
             return response.json()
         else:
-            print(f"⚠️ Ошибка получения звонков: Status {response.status_code}")
+            print(f"⚠️ Ошибка получения звонков: Status {response.status_code} | Ответ: {response.text}")
             return []
     except Exception as e:
         print(f"🔴 Ошибка сети при запросе к T2: {e}")
@@ -109,7 +113,7 @@ def send_to_moysklad(call_data):
             else:
                 print(f"ℹ️ Клиент с номером {caller_phone} не найден в МоемСкладе.")
         else:
-            print(f"🔴 Ошибка МойСклад API: {response.status_code}")
+            print(f"🔴 Ошибка МойСклад API: Status {response.status_code}")
     except Exception as e:
         print(f"🔴 Ошибка отправки в МойСклад: {e}")
 
