@@ -47,9 +47,8 @@ async def register_tele2_webhook_async():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🚀 Сервер запускается. Запуск фоновой подписки на Tele2...")
-    # Запускаем регистрацию асинхронно в фоновом режиме, не задерживая старт сервера
-    asyncio.create_task(register_tele2_webhook_async())
+    print("🚀 Сервер запускается...")
+    # asyncio.create_task(register_tele2_webhook_async())  # Отключено из-за блока IP Render со стороны T2
     yield
     print("🛑 Сервер останавливается...")
 
