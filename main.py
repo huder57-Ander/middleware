@@ -1,12 +1,13 @@
 import os
+import asyncio
 import httpx
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, BackgroundTasks
 
-# --- ФУНКЦИЯ РЕГИСТРАЦИИ ВЕБХУКА ---
+# --- АСИНХРОННАЯ РЕГИСТРАЦИЯ ВЕБХУКА ---
 
-def register_tele2_webhook():
-    """Автоматическая регистрация Webhook в Tele2 при старте приложения"""
+async def register_tele2_webhook_async():
+    """Асинхронная регистрация Webhook без блокировки старта Uvicorn"""
     global TELE2_ACCESS_TOKEN
     
     if not TELE2_ACCESS_TOKEN:
@@ -20,29 +21,35 @@ def register_tele2_webhook():
         "events": ["CALL_START", "CALL_END", "CALL_ANSWER"]
     }
 
-    try:
-        res = t2_client.post(url, headers=headers, json=body)
-        
-        # Если 401 или 403 (просрочен токен) — пробуем автоматически обновить
-        if res.status_code in (401, 403):
-            print("⚠️ Ошибка авторизации (403/401). Пробуем обновить Access Token через Refresh...")
-            if refresh_tele2_token():
-                headers = get_t2_headers(TELE2_ACCESS_TOKEN)
-                res = t2_client.post(url, headers=headers, json=body)
+    # Используем асинхронный клиент с увеличенным таймаутом (30 секунд)
+    async with httpx.AsyncClient(http2=True, follow_redirects=True, timeout=30.0) as client:
+        try:
+            print("⏳ Отправка запроса на регистрацию Webhook в Tele2...")
+            res = await client.post(url, headers=headers, json=body)
+            
+            # Если 401 или 403 — пробуем автоматически обновить токен
+            if res.status_code in (401, 403):
+                print("⚠️ Получена ошибка 403/401. Пробуем обновить Access Token через Refresh...")
+                if refresh_tele2_token():
+                    headers = get_t2_headers(TELE2_ACCESS_TOKEN)
+                    res = await client.post(url, headers=headers, json=body)
 
-        if res.status_code in (200, 201):
-            print(f"✅ Webhook успешно зарегистрирован в Tele2: {WEBHOOK_URL}")
-        else:
-            print(f"⚠️ Ошибка регистрации Webhook: Status {res.status_code} | Ответ: {res.text[:200]}")
-    except Exception as e:
-        print(f"🔴 Исключение при подписке на Webhook: {e}")
+            if res.status_code in (200, 201):
+                print(f"✅ Webhook успешно зарегистрирован в Tele2: {WEBHOOK_URL}")
+            else:
+                print(f"⚠️ Ошибка регистрации Webhook: Status {res.status_code} | Ответ: {res.text[:200]}")
+        except httpx.TimeoutException:
+            print("🔴 Ошибка: Сервер Tele2 не ответил вовремя ( Read Timeout ). Проверьте доступность API Tele2.")
+        except Exception as e:
+            print(f"🔴 Исключение при подписке на Webhook: {e}")
 
 # --- LIFESPAN (СТАРТ И ОСТАНОВКА) ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🚀 Сервер запускается. Выполняем подписку на события Tele2...")
-    register_tele2_webhook()
+    print("🚀 Сервер запускается. Запуск фоновой подписки на Tele2...")
+    # Запускаем регистрацию асинхронно в фоновом режиме, не задерживая старт сервера
+    asyncio.create_task(register_tele2_webhook_async())
     yield
     print("🛑 Сервер останавливается...")
 
@@ -61,8 +68,8 @@ WEBHOOK_URL = "https://middleware-hudia.onrender.com/api/tele2/webhook"
 
 processed_calls = set()
 
-# Постоянная сессия с поддержкой HTTP/2 и авто-перенаправлений
-t2_client = httpx.Client(http2=True, follow_redirects=True, timeout=12.0)
+# Постоянная сессия с поддержкой HTTP/2 для исходящих вызовов
+t2_client = httpx.Client(http2=True, follow_redirects=True, timeout=15.0)
 
 def get_t2_headers(token: str):
     """Форматирование заголовков под спецификацию авторизации Tele2 (без слова Bearer)"""
