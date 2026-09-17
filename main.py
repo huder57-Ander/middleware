@@ -2,7 +2,7 @@ import os
 import time
 import threading
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 app = FastAPI(title="Tele2 - MoySklad Middleware")
 
@@ -17,14 +17,18 @@ MOYSKLAD_TOKEN = os.getenv("MOYSKLAD_TOKEN", "").strip()
 processed_calls = set()
 
 def get_t2_headers(token: str):
+    """Форматирование заголовков под защиту Nginx/WAF Tele2"""
     clean_token = token.replace("Bearer ", "").strip()
     return {
         "Authorization": clean_token,
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control": "no-cache"
     }
 
-# Создаем единую постоянную HTTP/2 сессию для обхода фильтров Nginx
+# Единый клиент с поддержкой HTTP/2, переходов по редиректам и куки-сессий
 t2_client = httpx.Client(http2=True, follow_redirects=True, timeout=12.0)
 
 # --- ФУНКЦИИ ВЗАИМОДЕЙСТВИЯ С КАТС T2 ---
@@ -118,10 +122,42 @@ def send_to_moysklad(call_data):
     except Exception as e:
         print(f"🔴 Ошибка отправки в МойСклад: {e}")
 
+# --- ИСХОДЯЩИЕ ВЫЗОВЫ ---
+
+@app.post("/api/make-call")
+def make_outgoing_call(payload: dict):
+    """Инициализация исходящего вызова из МоегоСклада через Tele2"""
+    global TELE2_ACCESS_TOKEN
+    target_phone = payload.get("phone")
+    user_extension = payload.get("user")
+
+    if not target_phone:
+        return {"status": "error", "message": "Не указан номер телефона"}, 400
+
+    clean_phone = "".join(filter(str.isdigit, str(target_phone)))
+    url = f"{TELE2_API_URL}/calls/outgoing"
+    headers = get_t2_headers(TELE2_ACCESS_TOKEN)
+    body = {"phone": clean_phone, "user": user_extension}
+
+    try:
+        response = t2_client.post(url, headers=headers, json=body)
+        if response.status_code in (401, 403):
+            if refresh_tele2_token():
+                headers = get_t2_headers(TELE2_ACCESS_TOKEN)
+                response = t2_client.post(url, headers=headers, json=body)
+
+        if response.status_code in (200, 201, 202):
+            print(f"📞 Инициирован исходящий звонок сотрудником {user_extension} на {clean_phone}")
+            return {"status": "success", "data": response.json()}
+        else:
+            return {"status": "error", "code": response.status_code, "detail": response.text}, 400
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}, 500
+
 # --- ФОНОВЫЙ ПРОЦЕСС ОПРОСА ---
 
 def poll_tele2_loop():
-    """Фоновый цикл: запрашивает активные звонки каждые 3 секунды"""
+    """Фоновый опрос КАТС T2 раз в 5 секунд для снижения нагрузки на Nginx"""
     print("🚀 Запущен фоновый опрос КАТС T2...")
     while True:
         calls = get_active_calls()
@@ -129,13 +165,13 @@ def poll_tele2_loop():
             print(f"📲 Активные звонки в КАТС T2: {calls}")
             for call in calls:
                 send_to_moysklad(call)
-        time.sleep(3)
+        time.sleep(5)
 
 threading.Thread(target=poll_tele2_loop, daemon=True).start()
 
-# --- ЭНДПОИНТЫ ДЛЯ RENDER И МОЕГОСКЛАДА ---
+# --- ЭНДПОИНТЫ ДЛЯ RENDER И ВЕБХУКОВ ---
 
-@app.api_route("/", methods=["GET", "HEAD"])
+@app.api_route("/", methods=["GET", "HEAD", "POST"])
 def read_root():
     return {"status": "running", "service": "Tele2 - MoySklad Middleware"}
 
@@ -146,48 +182,3 @@ def moysklad_webhook():
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
-
-# --- ИСХОДЯЩИЕ ВЫЗОВЫ ИЗ МОЕГОСКЛАДА ---
-
-@app.post("/api/make-call")
-def make_outgoing_call(payload: dict):
-    """
-    Принимает запрос от МоегоСклада и инициирует исходящий вызов через КАТС T2.
-    Ожидаемый JSON: {"phone": "79XXXXXXXXX", "user": "101"}
-    """
-    global TELE2_ACCESS_TOKEN
-    target_phone = payload.get("phone")
-    user_extension = payload.get("user")  # Короткий добавочный номер сотрудника в КАТС T2
-
-    if not target_phone:
-        return {"status": "error", "message": "Не указан номер телефона"}, 400
-
-    # Очистка номера от лишних символов (пробелы, тире, плюсы)
-    clean_phone = "".join(filter(str.isdigit, str(target_phone)))
-
-    url = f"{TELE2_API_URL}/calls/outgoing"
-    headers = get_t2_headers(TELE2_ACCESS_TOKEN)
-    body = {
-        "phone": clean_phone,
-        "user": user_extension
-    }
-
-    try:
-        response = t2_client.post(url, headers=headers, json=body)
-
-        # Если токен истек, пробуем обновить
-        if response.status_code in (401, 403):
-            if refresh_tele2_token():
-                headers = get_t2_headers(TELE2_ACCESS_TOKEN)
-                response = t2_client.post(url, headers=headers, json=body)
-
-        if response.status_code in (200, 201, 202):
-            print(f"📞 Инициирован исходящий звонок сотрудником {user_extension} на номер {clean_phone}")
-            return {"status": "success", "data": response.json()}
-        else:
-            print(f"🔴 Ошибка создания вызова T2: Status {response.status_code} | Ответ: {response.text}")
-            return {"status": "error", "code": response.status_code, "detail": response.text}, 400
-
-    except Exception as e:
-        print(f"🔴 Исключение при отправке исходящего вызова: {e}")
-        return {"status": "error", "detail": str(e)}, 500
