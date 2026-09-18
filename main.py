@@ -149,10 +149,21 @@ def is_processed(call_id: str):
 # ==========================================================
 
 def get_t2_headers(token: str):
+    clean_token = token.replace("Bearer ", "").strip()
 
     return {
-        "Authorization": token.strip(),
-        "Accept": "application/json"
+        "Authorization": clean_token,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Origin": "https://ats2.t2.ru",
+        "Referer": "https://ats2.t2.ru/",
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/122.0 Safari/537.36"
+        )
     }
 # ==========================================================
 # PHONE NORMALIZATION
@@ -343,7 +354,39 @@ async def refresh_tele2_token():
 # REGISTER TELE2 WEBHOOK
 # ==========================================================
 
-async def register_tele2_webhook():
+async def get_active_calls():
+
+    url = f"{TELE2_API_URL}/monitoring/calls"
+
+    headers = get_t2_headers(
+        TELE2_ACCESS_TOKEN
+    )
+
+    try:
+        response = await tele2_client.get(
+            url,
+            headers=headers
+        )
+
+        if response.status_code == 200:
+            return response.json()
+
+        logger.error(
+            "Tele2 error %s %s",
+            response.status_code,
+            response.text
+        )
+
+        return []
+
+    except Exception as e:
+        logger.error(
+            "Tele2 connection error %s",
+            e
+        )
+
+        return []
+#async def register_tele2_webhook():
 
 
     if not TELE2_ACCESS_TOKEN:
