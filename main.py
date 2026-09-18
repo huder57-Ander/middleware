@@ -148,23 +148,17 @@ def is_processed(call_id: str):
 # Авторизация без Bearer
 # ==========================================================
 
-def get_t2_headers(token: str):
-    clean_token = token.replace("Bearer ", "").strip()
+def get_t2_headers(token):
 
     return {
-        "Authorization": clean_token,
+        "Authorization": token,
         "Accept": "application/json",
-        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
         "Origin": "https://ats2.t2.ru",
         "Referer": "https://ats2.t2.ru/",
-        "User-Agent": (
-            "Mozilla/5.0 "
-            "(Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/122.0 Safari/537.36"
-        )
+        "Connection": "keep-alive"
     }
+    
 # ==========================================================
 # PHONE NORMALIZATION
 # ==========================================================
@@ -209,7 +203,7 @@ async def lifespan(app: FastAPI):
 
 
     tele2_client = httpx.AsyncClient(
-    http2=False,
+    http2=True,
     follow_redirects=True,
     timeout=httpx.Timeout(
         connect=20.0,
