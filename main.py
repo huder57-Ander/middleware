@@ -1,12 +1,17 @@
 import os
+import time
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional
 
 import httpx
-from cachetools import TTLCache
 
-from fastapi import FastAPI, Request, BackgroundTasks, Header
+from fastapi import (
+    FastAPI,
+    Request,
+    BackgroundTasks,
+    Header
+)
+
 from fastapi.responses import JSONResponse
 
 
@@ -36,10 +41,12 @@ TELE2_API_URL = (
     .rstrip("/")
 )
 
+
 TELE2_ACCESS_TOKEN = os.getenv(
     "TELE2_ACCESS_TOKEN",
     ""
 ).strip()
+
 
 TELE2_REFRESH_TOKEN = os.getenv(
     "TELE2_REFRESH_TOKEN",
@@ -47,14 +54,17 @@ TELE2_REFRESH_TOKEN = os.getenv(
 ).strip()
 
 
+
 MOYSKLAD_API_URL = (
     "https://api.moysklad.ru/api/remap/1.2"
 )
+
 
 MOYSKLAD_TOKEN = os.getenv(
     "MOYSKLAD_TOKEN",
     ""
 ).strip()
+
 
 
 WEBHOOK_URL = os.getenv(
@@ -63,8 +73,6 @@ WEBHOOK_URL = os.getenv(
 )
 
 
-# Необязательно.
-# Если переменная задана - включается защита /api/make-call
 
 CALL_API_KEY = os.getenv(
     "CALL_API_KEY",
@@ -72,46 +80,101 @@ CALL_API_KEY = os.getenv(
 ).strip()
 
 
-# ==========================================================
-# GLOBAL CLIENTS
-# ==========================================================
-
-tele2_client: Optional[httpx.AsyncClient] = None
-moysklad_client: Optional[httpx.AsyncClient] = None
-
 
 # ==========================================================
-# CACHE CALLS
+# HTTP CLIENTS
 # ==========================================================
 
-processed_calls = TTLCache(
-    maxsize=10000,
-    ttl=86400
-)
+tele2_client = None
+
+moysklad_client = None
+
 
 
 # ==========================================================
-# TELE2 AUTH HEADERS
-# ВАЖНО:
-# Tele2 используется без Bearer
+# SIMPLE TTL CACHE FOR CALL IDS
+# ==========================================================
+
+processed_calls = {}
+
+CALL_CACHE_TTL = 86400
+
+
+def is_processed(call_id: str):
+
+    now = time.time()
+
+
+    # удаляем старые звонки
+
+    expired = [
+        key
+        for key, value in processed_calls.items()
+        if now - value > CALL_CACHE_TTL
+    ]
+
+
+    for key in expired:
+        del processed_calls[key]
+
+
+
+    if call_id in processed_calls:
+        return True
+
+
+
+    processed_calls[call_id] = now
+
+
+
+    # защита памяти
+
+    if len(processed_calls) > 10000:
+
+        first_key = next(
+            iter(processed_calls)
+        )
+
+        del processed_calls[first_key]
+
+
+    return False
+
+
+
+# ==========================================================
+# TELE2 HEADERS
+# Авторизация без Bearer
 # ==========================================================
 
 def get_t2_headers(token: str):
 
     clean_token = (
         token
-        .replace("Bearer ", "")
+        .replace(
+            "Bearer ",
+            ""
+        )
         .strip()
     )
 
+
     return {
-        "Authorization": clean_token,
-        "Accept": "application/json",
-        "Content-Type": "application/json",
+
+        "Authorization":
+            clean_token,
+
+        "Accept":
+            "application/json",
+
+        "Content-Type":
+            "application/json",
+
         "User-Agent":
             "Mozilla/5.0"
-    }
 
+    }
 
 # ==========================================================
 # PHONE NORMALIZATION
@@ -122,6 +185,7 @@ def normalize_phone(phone):
     if not phone:
         return None
 
+
     digits = "".join(
         filter(
             str.isdigit,
@@ -129,12 +193,16 @@ def normalize_phone(phone):
         )
     )
 
+
     if digits.startswith("8"):
-        digits = "7" + digits[1:]
+
+        digits = (
+            "7" +
+            digits[1:]
+        )
+
 
     return digits
-
-
 # ==========================================================
 # FASTAPI LIFESPAN
 # ==========================================================
@@ -145,15 +213,18 @@ async def lifespan(app: FastAPI):
     global tele2_client
     global moysklad_client
 
+
     logger.info(
-        "🚀 Starting middleware..."
+        "🚀 Запуск Tele2-MoySklad Middleware"
     )
+
 
     tele2_client = httpx.AsyncClient(
         http2=True,
         follow_redirects=True,
         timeout=20.0
     )
+
 
     moysklad_client = httpx.AsyncClient(
         timeout=15.0
@@ -163,16 +234,20 @@ async def lifespan(app: FastAPI):
     yield
 
 
+
     logger.info(
-        "🛑 Stopping middleware..."
+        "🛑 Остановка Middleware"
     )
 
 
     if tele2_client:
+
         await tele2_client.aclose()
 
 
+
     if moysklad_client:
+
         await moysklad_client.aclose()
 
 
@@ -181,19 +256,27 @@ app = FastAPI(
     title="Tele2 - MoySklad Middleware",
     lifespan=lifespan
 )
+
+
+
 # ==========================================================
-# TELE2 TOKEN REFRESH
+# REFRESH TELE2 TOKEN
 # ==========================================================
 
 async def refresh_tele2_token():
 
     global TELE2_ACCESS_TOKEN
 
+
+
     if not TELE2_REFRESH_TOKEN:
+
         logger.error(
             "Нет TELE2_REFRESH_TOKEN"
         )
+
         return False
+
 
 
     url = (
@@ -202,52 +285,74 @@ async def refresh_tele2_token():
     )
 
 
+
     headers = get_t2_headers(
         TELE2_REFRESH_TOKEN
     )
 
 
+
     try:
 
         response = await tele2_client.put(
+
             url,
+
             headers=headers
+
         )
+
 
 
         if response.status_code == 200:
 
+
             data = response.json()
 
+
             TELE2_ACCESS_TOKEN = data.get(
+
                 "accessToken",
+
                 TELE2_ACCESS_TOKEN
+
             )
 
 
             logger.info(
-                "🟢 Tele2 Access Token обновлен"
+                "🟢 Access Token Tele2 обновлен"
             )
+
 
             return True
 
 
+
         logger.error(
-            "Ошибка обновления токена Tele2 %s %s",
+
+            "Ошибка refresh Tele2 %s %s",
+
             response.status_code,
+
             response.text[:200]
+
         )
+
 
 
     except Exception as e:
 
         logger.exception(
-            "Ошибка refresh token Tele2: %s",
+
+            "Ошибка обновления Tele2 token: %s",
+
             e
+
         )
 
 
     return False
+
 
 
 
@@ -257,10 +362,13 @@ async def refresh_tele2_token():
 
 async def register_tele2_webhook():
 
+
     if not TELE2_ACCESS_TOKEN:
 
         logger.warning(
-            "Нет TELE2_ACCESS_TOKEN. Webhook не зарегистрирован"
+
+            "Нет TELE2_ACCESS_TOKEN"
+
         )
 
         return False
@@ -268,83 +376,142 @@ async def register_tele2_webhook():
 
 
     url = (
+
         f"{TELE2_API_URL}"
+
         "/subscription/events"
+
     )
+
 
 
     headers = get_t2_headers(
+
         TELE2_ACCESS_TOKEN
+
     )
 
 
-    payload = {
 
-        "url": WEBHOOK_URL,
+    body = {
 
-        "events": [
-            "CALL_START",
-            "CALL_END",
-            "CALL_ANSWER"
-        ]
+
+        "url":
+
+            WEBHOOK_URL,
+
+
+        "events":
+
+            [
+
+                "CALL_START",
+
+                "CALL_END",
+
+                "CALL_ANSWER"
+
+            ]
+
     }
+
 
 
     try:
 
+
         response = await tele2_client.post(
+
             url,
+
             headers=headers,
-            json=payload
+
+            json=body
+
         )
 
 
+
         if response.status_code in (
+
             401,
+
             403
+
         ):
 
+
             logger.warning(
-                "Tele2 token expired"
+
+                "Tele2 token просрочен"
+
             )
+
 
             if await refresh_tele2_token():
 
+
                 headers = get_t2_headers(
+
                     TELE2_ACCESS_TOKEN
+
                 )
 
+
                 response = await tele2_client.post(
+
                     url,
+
                     headers=headers,
-                    json=payload
+
+                    json=body
+
                 )
+
+
 
 
         if response.status_code in (
+
             200,
+
             201
+
         ):
 
+
             logger.info(
-                "✅ Tele2 webhook зарегистрирован"
+
+                "✅ Webhook Tele2 зарегистрирован"
+
             )
+
 
             return True
 
 
+
         logger.error(
-            "Ошибка регистрации webhook %s %s",
+
+            "Webhook ошибка %s %s",
+
             response.status_code,
+
             response.text[:300]
+
         )
+
 
 
     except Exception as e:
 
+
         logger.exception(
-            "Ошибка webhook registration: %s",
+
+            "Ошибка регистрации webhook: %s",
+
             e
+
         )
 
 
@@ -352,18 +519,21 @@ async def register_tele2_webhook():
 
 
 
+
+
 # ==========================================================
-# MOYSKLAD SEARCH
+# SEARCH CUSTOMER IN MOYSKLAD
 # ==========================================================
 
-async def find_customer_in_moysklad(
-    phone: str
-):
+async def find_customer_in_moysklad(phone):
+
 
     if not MOYSKLAD_TOKEN:
 
         logger.warning(
+
             "Нет MOYSKLAD_TOKEN"
+
         )
 
         return None
@@ -371,56 +541,81 @@ async def find_customer_in_moysklad(
 
 
     clean_phone = normalize_phone(
+
         phone
+
     )
 
 
     if not clean_phone:
+
         return None
 
 
 
     url = (
+
         f"{MOYSKLAD_API_URL}"
+
         "/entity/counterparty"
+
     )
+
 
 
     params = {
 
+
         "filter":
+
             f"phone={clean_phone}"
+
     }
+
 
 
     headers = {
 
+
         "Authorization":
+
             f"Bearer {MOYSKLAD_TOKEN}",
 
+
         "Accept":
+
             "application/json"
+
     }
 
 
 
     try:
 
+
         response = await moysklad_client.get(
+
             url,
+
             headers=headers,
+
             params=params
+
         )
+
 
 
         if response.status_code == 200:
 
-            data = response.json()
 
-            rows = data.get(
+            rows = response.json().get(
+
                 "rows",
+
                 []
+
             )
+
 
 
             if rows:
@@ -428,26 +623,39 @@ async def find_customer_in_moysklad(
                 return rows[0]
 
 
+
             return None
 
 
 
         logger.error(
-            "МойСклад ошибка %s %s",
+
+            "Ошибка МойСклад %s %s",
+
             response.status_code,
+
             response.text[:200]
+
         )
+
 
 
     except Exception as e:
 
+
         logger.exception(
-            "Ошибка поиска МойСклад: %s",
+
+            "Ошибка поиска клиента: %s",
+
             e
+
         )
 
 
+
     return None
+
+
 
 
 
@@ -456,49 +664,76 @@ async def find_customer_in_moysklad(
 # ==========================================================
 
 async def process_incoming_call(
-    caller_phone: str,
-    call_id: str
+
+    caller_phone,
+
+    call_id
+
 ):
 
+
     if not caller_phone or not call_id:
+
         return
 
 
 
-    if call_id in processed_calls:
+    if is_processed(
+
+        str(call_id)
+
+    ):
+
 
         logger.info(
+
             "Дубликат звонка %s",
+
             call_id
+
         )
+
 
         return
 
 
-
-    processed_calls[call_id] = True
 
 
     customer = await find_customer_in_moysklad(
+
         caller_phone
+
     )
+
 
 
     if customer:
 
+
         logger.info(
+
             "✅ Клиент найден: %s | %s",
+
             customer.get("name"),
+
             caller_phone
+
         )
+
+
 
     else:
 
+
         logger.info(
+
             "ℹ️ Новый номер: %s",
+
             caller_phone
+
         )
-        # ==========================================================
+    
+# ==========================================================
 # TELE2 WEBHOOK
 # ==========================================================
 
@@ -512,15 +747,14 @@ async def tele2_webhook(
 
         data = await request.json()
 
+
         logger.info(
             "📥 Tele2 webhook: %s",
             data
         )
 
 
-        # Поддержка разных вариантов JSON Tele2
-
-        call_data = data.get(
+        call = data.get(
             "call",
             {}
         )
@@ -534,9 +768,9 @@ async def tele2_webhook(
 
             or data.get("phone")
 
-            or call_data.get("caller")
+            or call.get("caller")
 
-            or call_data.get("from")
+            or call.get("from")
 
         )
 
@@ -547,14 +781,15 @@ async def tele2_webhook(
 
             or data.get("id")
 
-            or call_data.get("callId")
+            or call.get("callId")
 
-            or call_data.get("id")
+            or call.get("id")
 
         )
 
 
         if caller and call_id:
+
 
             background_tasks.add_task(
 
@@ -567,16 +802,26 @@ async def tele2_webhook(
             )
 
 
+
         return {
-            "status": "ok"
+
+            "status":
+
+                "ok"
+
         }
+
 
 
     except Exception as e:
 
+
         logger.exception(
-            "Ошибка обработки Tele2 webhook: %s",
+
+            "Ошибка Tele2 webhook: %s",
+
             e
+
         )
 
 
@@ -586,13 +831,19 @@ async def tele2_webhook(
 
             content={
 
-                "status": "error",
+                "status":
 
-                "detail": str(e)
+                    "error",
+
+                "detail":
+
+                    str(e)
 
             }
 
         )
+
+
 
 
 
@@ -612,12 +863,13 @@ async def make_outgoing_call(
 ):
 
 
-    # Если задан CALL_API_KEY,
-    # включаем проверку
+    # Проверка ключа если включен
 
     if CALL_API_KEY:
 
+
         if x_api_key != CALL_API_KEY:
+
 
             return JSONResponse(
 
@@ -625,10 +877,13 @@ async def make_outgoing_call(
 
                 content={
 
-                    "status":"error",
+                    "status":
+
+                        "error",
 
                     "message":
-                    "Unauthorized"
+
+                        "Unauthorized"
 
                 }
 
@@ -639,17 +894,24 @@ async def make_outgoing_call(
     global TELE2_ACCESS_TOKEN
 
 
+
     phone = payload.get(
+
         "phone"
+
     )
 
+
     user = payload.get(
+
         "user"
+
     )
 
 
 
     if not phone:
+
 
         return JSONResponse(
 
@@ -657,10 +919,13 @@ async def make_outgoing_call(
 
             content={
 
-                "status":"error",
+                "status":
+
+                    "error",
 
                 "message":
-                "Не указан телефон"
+
+                    "Не указан телефон"
 
             }
 
@@ -669,12 +934,15 @@ async def make_outgoing_call(
 
 
     clean_phone = normalize_phone(
+
         phone
+
     )
 
 
 
     if not clean_phone:
+
 
         return JSONResponse(
 
@@ -682,10 +950,13 @@ async def make_outgoing_call(
 
             content={
 
-                "status":"error",
+                "status":
+
+                    "error",
 
                 "message":
-                "Неверный номер"
+
+                    "Некорректный номер"
 
             }
 
@@ -693,29 +964,43 @@ async def make_outgoing_call(
 
 
 
+
     url = (
+
         f"{TELE2_API_URL}"
+
         "/calls/outgoing"
+
     )
+
 
 
     body = {
 
+
         "phone":
+
             clean_phone,
 
+
         "user":
+
             user
 
     }
 
 
 
+
     try:
 
+
         headers = get_t2_headers(
+
             TELE2_ACCESS_TOKEN
+
         )
+
 
 
         response = await tele2_client.post(
@@ -730,16 +1015,24 @@ async def make_outgoing_call(
 
 
 
+
         if response.status_code in (
+
             401,
+
             403
+
         ):
+
 
 
             if await refresh_tele2_token():
 
+
                 headers = get_t2_headers(
+
                     TELE2_ACCESS_TOKEN
+
                 )
 
 
@@ -755,13 +1048,18 @@ async def make_outgoing_call(
 
 
 
+
+
         if response.status_code in (
 
             200,
+
             201,
+
             202
 
         ):
+
 
 
             logger.info(
@@ -775,15 +1073,22 @@ async def make_outgoing_call(
             )
 
 
+
             return {
 
+
                 "status":
+
                     "success",
 
+
                 "data":
+
                     response.json()
 
             }
+
+
 
 
 
@@ -793,13 +1098,19 @@ async def make_outgoing_call(
 
             content={
 
+
                 "status":
+
                     "error",
 
+
                 "code":
+
                     response.status_code,
 
+
                 "detail":
+
                     response.text
 
             }
@@ -808,13 +1119,18 @@ async def make_outgoing_call(
 
 
 
+
     except Exception as e:
 
 
         logger.exception(
+
             "Ошибка исходящего звонка: %s",
+
             e
+
         )
+
 
 
         return JSONResponse(
@@ -823,15 +1139,22 @@ async def make_outgoing_call(
 
             content={
 
+
                 "status":
+
                     "error",
 
+
                 "detail":
+
                     str(e)
 
             }
 
         )
+
+
+
 
 
 
@@ -842,18 +1165,26 @@ async def make_outgoing_call(
 @app.post("/api/register-webhook")
 async def manual_register_webhook():
 
+
     result = await register_tele2_webhook()
+
 
 
     return {
 
+
         "registered":
+
             result,
 
+
         "webhook":
+
             WEBHOOK_URL
 
     }
+
+
 
 
 
@@ -862,27 +1193,43 @@ async def manual_register_webhook():
 # ==========================================================
 
 @app.api_route(
+
     "/",
+
     methods=[
+
         "GET",
+
         "HEAD",
+
         "POST"
+
     ]
+
 )
+
 async def root():
 
     return {
 
+
         "status":
+
             "running",
 
+
         "service":
+
             "Tele2-MoySklad",
 
+
         "mode":
+
             "webhook"
 
     }
+
+
 
 
 
@@ -891,7 +1238,9 @@ async def health():
 
     return {
 
+
         "status":
+
             "ok"
 
-    }
+    }    
