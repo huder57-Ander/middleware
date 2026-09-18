@@ -1171,35 +1171,33 @@ async def manual_register_webhook():
 # ==========================================================
 # TEST TELE2 CONNECTION
 # ==========================================================
-@app.get("/api/test-tele2")
-async def test_tele2():
+@app.get("/api/test-http-version")
+async def test_http_version():
 
     url = "https://ats2.t2.ru/crm/openapi/monitoring/calls"
-
-    headers = {
-        "Accept": "application/json",
-        "Authorization": TELE2_ACCESS_TOKEN.strip(),
-        "User-Agent": "curl/8.7.1"
-    }
 
     try:
 
         async with httpx.AsyncClient(
             http2=True,
-            follow_redirects=False,
             timeout=30.0
         ) as client:
 
             response = await client.get(
                 url,
-                headers=headers
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": TELE2_ACCESS_TOKEN,
+                    "Origin": "https://ats2.t2.ru",
+                    "Referer": "https://ats2.t2.ru/"
+                }
             )
 
             return {
-                "status_code": response.status_code,
-                "request_headers": headers,
+                "http_version": response.http_version,
+                "status": response.status_code,
                 "response_headers": dict(response.headers),
-                "response": response.text[:500]
+                "body": response.text[:300]
             }
 
     except Exception as e:
@@ -1207,6 +1205,22 @@ async def test_tele2():
         return {
             "error": str(e)
         }
+
+После этого:
+
+Сохранить main.py
+Сделать Deploy в Render
+Открыть:
+https://middleware-hudia.onrender.com/api/test-http-version
+
+Нам нужен только этот кусок ответа:
+
+{
+ "http_version": "...",
+ "status": ...
+}
+
+ 
 # ==========================================================
 # SERVICE ENDPOINTS
 # ==========================================================
