@@ -159,17 +159,11 @@ def get_t2_headers(token: str):
         .strip()
     )
 
-
     return {
-
-        "Authorization":
-            clean_token,
-
-        "Accept":
-            "application/json",
-
-        "User-Agent":
-            "Tele2-Middleware/1.0"
+        "Authorization": clean_token,
+        "Accept": "application/json",
+        "User-Agent": "Tele2-Middleware/1.0"
+    }
 
 # ==========================================================
 # PHONE NORMALIZATION
