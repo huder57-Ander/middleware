@@ -1,4 +1,4 @@
-import os
+mport os
 import time
 import logging
 from contextlib import asynccontextmanager
@@ -347,6 +347,78 @@ async def make_outgoing_call(
 async def test_tele2():
     result = await get_active_calls()
     return {"status_code": 200, "body": result}
+
+
+@app.get("/api/test-moysklad")
+async def test_moysklad():
+    """Read-only connectivity test for MoySklad."""
+    if not MOYSKLAD_TOKEN:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "detail": "MOYSKLAD_TOKEN is not configured",
+            },
+        )
+
+    if moysklad_client is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "detail": "MoySklad HTTP client is not initialized",
+            },
+        )
+
+    url = f"{MOYSKLAD_API_URL}/entity/counterparty"
+    headers = {
+        "Authorization": f"Bearer {MOYSKLAD_TOKEN}",
+        "Accept": "application/json",
+        "User-Agent": "Tele2-MoySklad-Middleware/1.0",
+    }
+
+    try:
+        response = await moysklad_client.get(
+            url,
+            headers=headers,
+            params={"limit": 1},
+        )
+        body = safe_json(response)
+
+        if response.is_success:
+            rows = body.get("rows", []) if isinstance(body, dict) else []
+            return {
+                "status": "ok",
+                "status_code": response.status_code,
+                "moysklad_connected": True,
+                "counterparty_sample_count": len(rows),
+            }
+
+        return JSONResponse(
+            status_code=502,
+            content={
+                "status": "error",
+                "moysklad_connected": False,
+                "moysklad_status": response.status_code,
+                "detail": body,
+            },
+        )
+    except httpx.RequestError as exc:
+        logger.exception("Ошибка подключения к МойСклад")
+        return JSONResponse(
+            status_code=502,
+            content={
+                "status": "error",
+                "moysklad_connected": False,
+                "detail": str(exc),
+            },
+        )
+    except Exception as exc:
+        logger.exception("Ошибка теста МойСклад")
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "detail": str(exc)},
+        )
 
 
 @app.get("/")
