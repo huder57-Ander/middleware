@@ -1192,26 +1192,17 @@ async def test_tele2():
             )
         )
 
-
         return {
-
             "url": url,
-
             "status_code": response.status_code,
-
-            "response": response.text[:1000]
-
+            "response": response.text[:500]
         }
-
 
     except Exception as e:
 
         return {
-
             "error": str(e)
-
         }
-
 # ==========================================================
 # SERVICE ENDPOINTS
 # ==========================================================
