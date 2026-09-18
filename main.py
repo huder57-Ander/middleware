@@ -558,19 +558,12 @@ async def find_customer_in_moysklad(phone):
 
 
     headers = {
-
-
-        "Authorization":
-
-            f"Bearer {MOYSKLAD_TOKEN}",
-
-
-        "Accept":
-
-            "application/json"
-
-    }
-
+    "Accept": "application/json",
+    "Authorization": TELE2_ACCESS_TOKEN,
+    "Origin": "https://ats2.t2.ru",
+    "Referer": "https://ats2.t2.ru/",
+    "User-Agent": "Mozilla/5.0"
+}
 
 
     try:
@@ -1171,45 +1164,40 @@ async def manual_register_webhook():
 # ==========================================================
 # TEST TELE2 CONNECTION
 # ==========================================================
-@app.get("/api/test-http-version")
-async def test_http_version():
+@app.get("/api/test-tele2")
+async def test_tele2():
 
     url = "https://ats2.t2.ru/crm/openapi/monitoring/calls"
 
     headers = {
-        "Host": "ats2.t2.ru",
         "Accept": "application/json",
-        "Authorization": TELE2_ACCESS_TOKEN.strip(),
-        "User-Agent": "curl/8.7.1",
-        "Connection": "keep-alive"
+        "Authorization": TELE2_ACCESS_TOKEN,
+        "Origin": "https://ats2.t2.ru",
+        "Referer": "https://ats2.t2.ru/",
+        "User-Agent": "Mozilla/5.0"
     }
 
-    try:
+    params = {
+        "page": 0,
+        "size": 20
+    }
 
-        async with httpx.AsyncClient(
-            http2=True,
-            timeout=30.0
-        ) as client:
+    async with httpx.AsyncClient(
+        http2=True,
+        timeout=30
+    ) as client:
 
-            response = await client.get(
-                url,
-                headers=headers
-            )
-
-            return {
-                "http_version": response.http_version,
-                "status": response.status_code,
-                "request_headers": headers,
-                "response_headers": dict(response.headers),
-                "body": response.text[:500]
-            }
-
-    except Exception as e:
+        r = await client.get(
+            url,
+            headers=headers,
+            params=params
+        )
 
         return {
-            "error": str(e)
+            "url": str(r.request.url),
+            "status": r.status_code,
+            "body": r.text[:500]
         }
- 
 # ==========================================================
 # SERVICE ENDPOINTS
 # ==========================================================
