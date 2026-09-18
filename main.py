@@ -1206,34 +1206,27 @@ async def test_tele2():
 
     url = "https://ats2.t2.ru/crm/openapi/monitoring/calls"
 
-    headers = {
-        "Accept": "application/json",
-        "Authorization": TELE2_ACCESS_TOKEN,
-        "Origin": "https://ats2.t2.ru",
-        "Referer": "https://ats2.t2.ru/",
-        "User-Agent": "Mozilla/5.0"
-    }
+    headers = get_t2_headers(
+        TELE2_ACCESS_TOKEN
+    )
 
-    params = {
-        "page": 0,
-        "size": 20
-    }
+    try:
 
-    async with httpx.AsyncClient(
-        http2=True,
-        timeout=30
-    ) as client:
-
-        r = await client.get(
+        response = await tele2_client.get(
             url,
-            headers=headers,
-            params=params
+            headers=headers
         )
 
         return {
-            "url": str(r.request.url),
-            "status": r.status_code,
-            "body": r.text[:500]
+            "status_code": response.status_code,
+            "headers": dict(response.headers),
+            "body": response.text
+        }
+
+    except Exception as e:
+
+        return {
+            "error": str(e)
         }
 # ==========================================================
 # SERVICE ENDPOINTS
