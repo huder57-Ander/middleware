@@ -1174,22 +1174,33 @@ async def manual_register_webhook():
 @app.get("/api/test-tele2")
 async def test_tele2():
 
-    url = f"{TELE2_API_URL}/monitoring/calls"
+    url = "https://ats2.t2.ru/crm/openapi/monitoring/calls"
+
+    headers = {
+        "Accept": "application/json",
+        "Authorization": TELE2_ACCESS_TOKEN.strip(),
+        "User-Agent": "curl/8.7.1"
+    }
 
     try:
 
-        response = await tele2_client.get(
-            url,
-            headers=get_t2_headers(
-                TELE2_ACCESS_TOKEN
-            )
-        )
+        async with httpx.AsyncClient(
+            http2=True,
+            follow_redirects=False,
+            timeout=30.0
+        ) as client:
 
-        return {
-            "url": url,
-            "status_code": response.status_code,
-            "response": response.text[:500]
-        }
+            response = await client.get(
+                url,
+                headers=headers
+            )
+
+            return {
+                "status_code": response.status_code,
+                "request_headers": headers,
+                "response_headers": dict(response.headers),
+                "response": response.text[:500]
+            }
 
     except Exception as e:
 
