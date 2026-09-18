@@ -952,7 +952,7 @@ async def make_outgoing_call(
 
         f"{TELE2_API_URL}"
 
-        "/calls/outgoing"
+        "/call/outgoing"
 
     )
 
@@ -1205,20 +1205,6 @@ async def test_http_version():
         return {
             "error": str(e)
         }
-
-После этого:
-
-Сохранить main.py
-Сделать Deploy в Render
-Открыть:
-https://middleware-hudia.onrender.com/api/test-http-version
-
-Нам нужен только этот кусок ответа:
-
-{
- "http_version": "...",
- "status": ...
-}
 
  
 # ==========================================================
