@@ -168,13 +168,8 @@ def get_t2_headers(token: str):
         "Accept":
             "application/json",
 
-        "Content-Type":
-            "application/json",
-
         "User-Agent":
-            "Mozilla/5.0"
-
-    }
+            "Tele2-Middleware/1.0"
 
 # ==========================================================
 # PHONE NORMALIZATION
@@ -220,10 +215,15 @@ async def lifespan(app: FastAPI):
 
 
     tele2_client = httpx.AsyncClient(
-        http2=True,
-        follow_redirects=True,
-        timeout=20.0
+    http2=False,
+    follow_redirects=True,
+    timeout=httpx.Timeout(
+        connect=20.0,
+        read=90.0,
+        write=30.0,
+        pool=30.0
     )
+)
 
 
     moysklad_client = httpx.AsyncClient(
