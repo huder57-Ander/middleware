@@ -1176,6 +1176,14 @@ async def test_http_version():
 
     url = "https://ats2.t2.ru/crm/openapi/monitoring/calls"
 
+    headers = {
+        "Host": "ats2.t2.ru",
+        "Accept": "application/json",
+        "Authorization": TELE2_ACCESS_TOKEN.strip(),
+        "User-Agent": "curl/8.7.1",
+        "Connection": "keep-alive"
+    }
+
     try:
 
         async with httpx.AsyncClient(
@@ -1185,19 +1193,15 @@ async def test_http_version():
 
             response = await client.get(
                 url,
-                headers={
-                    "Accept": "application/json",
-                    "Authorization": TELE2_ACCESS_TOKEN,
-                    "Origin": "https://ats2.t2.ru",
-                    "Referer": "https://ats2.t2.ru/"
-                }
+                headers=headers
             )
 
             return {
                 "http_version": response.http_version,
                 "status": response.status_code,
+                "request_headers": headers,
                 "response_headers": dict(response.headers),
-                "body": response.text[:300]
+                "body": response.text[:500]
             }
 
     except Exception as e:
@@ -1205,7 +1209,6 @@ async def test_http_version():
         return {
             "error": str(e)
         }
-
  
 # ==========================================================
 # SERVICE ENDPOINTS
