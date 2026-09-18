@@ -152,17 +152,13 @@ def get_t2_headers(token: str):
 
     clean_token = (
         token
-        .replace(
-            "Bearer ",
-            ""
-        )
+        .replace("Bearer ", "")
         .strip()
     )
 
     return {
         "Authorization": clean_token,
-        "Accept": "application/json",
-        "User-Agent": "Tele2-Middleware/1.0"
+        "Accept": "application/json"
     }
 
 # ==========================================================
