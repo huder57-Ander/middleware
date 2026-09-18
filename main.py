@@ -1188,14 +1188,15 @@ async def manual_register_webhook():
 # ==========================================================
 # TEST TELE2 CONNECTION
 # ==========================================================
-
 @app.get("/api/test-tele2")
 async def test_tele2():
+
+    url = f"{TELE2_API_URL}/monitoring/calls"
 
     try:
 
         response = await tele2_client.get(
-            TELE2_API_URL,
+            url,
             headers=get_t2_headers(
                 TELE2_ACCESS_TOKEN
             )
@@ -1204,29 +1205,22 @@ async def test_tele2():
 
         return {
 
-            "tele2_url": TELE2_API_URL,
+            "url": url,
 
             "status_code": response.status_code,
 
-            "response": response.text[:500]
+            "response": response.text[:1000]
 
         }
 
 
     except Exception as e:
 
-
-        logger.exception(
-            "Ошибка теста Tele2"
-        )
-
-
         return {
 
             "error": str(e)
 
         }
-
 
 # ==========================================================
 # SERVICE ENDPOINTS
