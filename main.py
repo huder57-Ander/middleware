@@ -234,8 +234,8 @@ async def refresh_tele2_token() -> bool:
 # Стало:
 
 async def get_t2_employee_full_number(src_number):
-    # ВНИМАНИЕ: Здесь должен быть строго ats2.t2.ru, а не просто t2.ru
-    url = "https://t2.ru"
+    
+    url = "https://ats2.t2.ru"
     
     # Считываем токен из настроенной вами переменной в Render
     t2_token = os.getenv("TELE2_ACCESS_TOKEN") or ""
@@ -299,46 +299,41 @@ async def get_t2_employee_full_number(src_number):
         response.raise_for_status()
         return response.json() # или ваша логика обработки
 
-async def call_tele2_outgoing(destination: Any, source: Any) -> tuple[bool, Any, int]:
-    if tele2_client is None:
-        return False, {"message": "HTTP client not ready"}, 503
+async def make_t2_outgoing_call(source_employee, destination_client):
+    url = "https://ats2.t2.ru/crm/openapi/call/outgoing"
+    t2_token = os.getenv("TELE2_ACCESS_TOKEN") or ""
 
-    clean_destination = normalize_phone(destination)
-    clean_source = str(source or "").strip()
-    if not clean_destination:
-        return False, {"message": "Некорректный номер назначения"}, 400
-    if not clean_source:
-        return False, {"message": "Не указан внутренний номер source"}, 400
+    # 1. Защита формата номера: АТС Т2 требует номера в международном формате с плюсом.
+    # Если из МоегоСклада номер пришел без +, добавляем его принудительно.
+    clean_destination = str(destination_client).strip()
+    if not clean_destination.startswith("+"):
+        clean_destination = f"+{clean_destination}"
 
-    url = f"{TELE2_API_URL}/call/outgoing"
-    params = {
-        "destination": clean_destination,
-        "source": clean_source,
+    # 2. Строгие заголовки для POST-метода звонка
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json", # Гарантирует правильную интерпретацию запроса сервером
+        "Authorization": t2_token,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
-
-    try:
-        response = await tele2_client.post(
-            url,
-            headers=get_t2_headers(TELE2_ACCESS_TOKEN),
-            params=params,
-        )
-        if response.status_code in (401, 403) and await refresh_tele2_token():
-            response = await tele2_client.post(
-                url,
-                headers=get_t2_headers(TELE2_ACCESS_TOKEN),
-                params=params,
-            )
-
-        result = safe_json(response)
-        if response.status_code in (200, 201, 202):
-            logger.info("📞 Исходящий вызов %s -> %s", clean_source, clean_destination)
-            return True, result, response.status_code
-
-        logger.error("T2 outgoing error %s %s", response.status_code, response.text[:300])
-        return False, result, response.status_code
-    except Exception as exc:
-        logger.exception("Ошибка исходящего вызова T2")
-        return False, {"message": str(exc)}, 500
+    
+    # 3. Передаем параметры
+    params = {
+        "source": str(source_employee),      # Например: '0100' или полный номер
+        "destination": clean_destination     # Теперь точно будет '+7991'
+    }
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            # Делаем POST-запрос с query-параметрами и расширенными заголовками
+            response = await client.post(url, headers=headers, params=params, timeout=10.0)
+            response.raise_for_status()
+            return response.json()
+            
+        except httpx.HTTPStatusError as exc:
+            logger.error(f"Ошибка Т2 при совершении звонка ({exc.response.status_code}): {exc.response.text}")
+            # Возвращаем кастомный словарь, чтобы вебхук МоегоСклада корректно завершился
+            return {"status": "error", "code": exc.response.status_code}
 
 
 # ============================================================
