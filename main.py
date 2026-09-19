@@ -272,7 +272,9 @@ async def call_tele2_outgoing(destination: Any, source: Any) -> tuple[bool, Any,
         return False, {"message": "Не указан внутренний номер source"}, 400
 
     url = f"{TELE2_API_URL}/call/outgoing"
-    params = {
+
+    # Передаём параметры через JSON body, а НЕ params!
+    body = {
         "destination": clean_destination,
         "source": clean_source,
     }
@@ -281,13 +283,13 @@ async def call_tele2_outgoing(destination: Any, source: Any) -> tuple[bool, Any,
         response = await tele2_client.post(
             url,
             headers=get_t2_headers(TELE2_ACCESS_TOKEN),
-            params=params,
+            json=body,  # <-- ИСПРАВЛЕНО (было params=params)
         )
         if response.status_code in (401, 403) and await refresh_tele2_token():
             response = await tele2_client.post(
                 url,
                 headers=get_t2_headers(TELE2_ACCESS_TOKEN),
-                params=params,
+                json=body,
             )
 
         result = safe_json(response)
@@ -300,8 +302,6 @@ async def call_tele2_outgoing(destination: Any, source: Any) -> tuple[bool, Any,
     except Exception as exc:
         logger.exception("Ошибка исходящего вызова T2")
         return False, {"message": str(exc)}, 500
-
-
 # ============================================================
 # MOYSKLAD PROVIDER ENDPOINT
 # ============================================================
