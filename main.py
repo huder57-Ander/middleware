@@ -106,13 +106,16 @@ def extract_first(data: Any, *paths: tuple[str, ...]) -> Any:
     return None
 
 
-def get_t2_headers(token: str):
-    clean_token = token.strip().replace("Bearer ", "")
+def get_t2_headers(token: str) -> dict[str, str]:
+    clean_token = token.strip().replace("Bearer ", "").strip()
 
     return {
         "Authorization": clean_token,
-        "Accept": "application/json",
+        "Accept": "application/json, text/plain, */*",
         "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Origin": "https://ats2.t2.ru",
+        "Referer": "https://ats2.t2.ru/",
     }
 
 
