@@ -231,72 +231,24 @@ async def refresh_tele2_token() -> bool:
     except Exception:
         logger.exception("Ошибка обновления T2 token")
     return False
-async def get_t2_employee_full_number(short_number: str):
-    """Находит полный номер T2 по внутреннему номеру."""
-
-    if tele2_client is None:
-        return None
-
-    short_number = str(short_number or "").strip()
-
-    if not short_number:
-        return None
-
-    url = f"{TELE2_API_URL}/employees"
-
-    response = await tele2_client.get(
-        url,
-        headers=get_t2_headers(TELE2_ACCESS_TOKEN),
-    )
-
-    if response.status_code == 401 and await refresh_tele2_token():
-        response = await tele2_client.get(
-            url,
-            headers=get_t2_headers(TELE2_ACCESS_TOKEN),
-        )
-
-    response.raise_for_status()
-
-    employees = safe_json(response)
-
-    if isinstance(employees, dict):
-        employees = (
-            employees.get("employees")
-            or employees.get("content")
-            or employees.get("data")
-            or []
-        )
-
-    if not isinstance(employees, list):
-        logger.error("Неверный формат ответа T2 /employees")
-        return None
-
-    for employee in employees:
-        if not isinstance(employee, dict):
-            continue
-
-        employee_short = str(
-            employee.get("shortNumber") or ""
-        ).strip()
-
-        if employee_short == short_number:
-            full_number = employee.get("fullNumber")
-
-            if full_number:
-                logger.info(
-                    "T2 employee mapped: %s -> ***%s",
-                    short_number,
-                    str(full_number)[-4:],
-                )
-
-                return str(full_number).strip()
-
-    logger.error(
-        "T2 employee not found by shortNumber: %s",
-        short_number,
-    )
-
-    return None
+# Стало:
+async def get_t2_employee_full_number(src_number):
+    url = "https://ats2.t2.ru/crm/openapi/employees"
+    
+    headers = {
+        # Указываем, что ждем от сервера только JSON
+        "Accept": "application/json", 
+        # Некоторые защитные системы (WAF) T2 сбрасывают запросы без User-Agent
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        # Если для этого эндпоинта нужен токен (например, X-Client-Id или Authorization), 
+        # убедитесь, что он тоже передается здесь:
+        # "Authorization": f"Bearer {YOUR_T2_TOKEN}" 
+    }
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        return response.json() # или ваша логика обработки
 
 async def call_tele2_outgoing(destination: Any, source: Any) -> tuple[bool, Any, int]:
     if tele2_client is None:
