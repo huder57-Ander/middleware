@@ -119,15 +119,12 @@ def get_t2_headers(token: str) -> dict[str, str]:
     }
 
 
-def get_moysklad_phone_headers() -> dict[str, str]:
+def get_moysklad_phone_headers():
     return {
-        "Lognex-Phone-Auth-Token": MOYSKLAD_PHONE_API_KEY,
-        "Accept": "application/json",
-        "Accept-Encoding": "gzip",
-        "Content-Type": "application/json",
-        "User-Agent": "Tele2-MoySklad-PhoneAPI/1.0",
+        "Accept": "application/json;charset=utf-8",
+        "Content-Type": "application/json;charset=utf-8",
+        "Authorization": f"Bearer {os.getenv('MOYSKLAD_PHONE_API_KEY')}",
     }
-
 
 def remember_call(external_id: str) -> None:
     now = time.time()
