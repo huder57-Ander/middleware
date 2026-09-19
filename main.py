@@ -232,17 +232,38 @@ async def refresh_tele2_token() -> bool:
         logger.exception("Ошибка обновления T2 token")
     return False
 # Стало:
+
 async def get_t2_employee_full_number(src_number):
     url = "https://ats2.t2.ru/crm/openapi/employees"
     
+    # Достаем токен из переменных окружения Render
+    # Если вы не настраивали переменные среды, временно замените 
+    # os.getenv("T2_ACCESS_TOKEN") на ваш реальный токен в кавычках: "ваш_токен"
+    t2_token = os.getenv("T2_ACCESS_TOKEN", "ВАШ_РЕАЛЬНЫЙ_ACCESS_TOKEN")
+
     headers = {
+        # ОБЯЗАТЕЛЬНО для АТС Т2, иначе вернет 406 Not Acceptable
         "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        # Передаем токен авторизации
-        "Authorization": TELE2_ACCESS_TOKEN, 
-        # Передаем обязательный ID клиента АТС, без которого сервер вернет 406
-        "X-Client-Id": destNumber
+        # По документации Т2 передается «чистый» токен БЕЗ слова Bearer
+        "Authorization": t2_token,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        
+        # Перебираем полученных сотрудников, чтобы найти fullNumber по внутреннему source (например, 0100)
+        employees = response.json()
+        for employee in employees:
+            # Сверяем по id или имени/номеру в зависимости от того, что у вас в src_number
+            # Если src_number приходит как строка '0100', а в Т2 это employeeId (число) или часть номера:
+            if str(employee.get("employeeId")) == str(src_number) or employee.get("name") == str(src_number):
+                return employee.get("fullNumber")
+        
+        # Если совпадений не найдено, возвращаем сам внутренний номер как запасной вариант
+        return src_number
+
     
     async with httpx.AsyncClient() as client:
         response = await client.get(url, headers=headers)
