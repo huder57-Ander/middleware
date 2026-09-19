@@ -111,9 +111,10 @@ def get_t2_headers(token: str):
 
     return {
         "Authorization": clean_token,
-        "Accept": "*/*",
+        "Accept": "application/json",
         "Content-Type": "application/json",
     }
+
 
 
 def get_moysklad_phone_headers() -> dict[str, str]:
