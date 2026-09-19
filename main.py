@@ -239,7 +239,7 @@ async def get_t2_employee_full_number(src_number):
     # Достаем токен из переменных окружения Render
     # Если вы не настраивали переменные среды, временно замените 
     # os.getenv("T2_ACCESS_TOKEN") на ваш реальный токен в кавычках: "ваш_токен"
-    t2_token = os.getenv("T2_ACCESS_TOKEN", "ВАШ_РЕАЛЬНЫЙ_ACCESS_TOKEN")
+    t2_token = os.getenv(TELE2_ACCESS_TOKEN)
 
     headers = {
         # ОБЯЗАТЕЛЬНО для АТС Т2, иначе вернет 406 Not Acceptable
