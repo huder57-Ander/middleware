@@ -107,18 +107,16 @@ def extract_first(data: Any, *paths: tuple[str, ...]) -> Any:
 
 
 def get_t2_headers(token: str) -> dict[str, str]:
-    token = token.strip()
-    
-    # Убеждаемся, что токен содержит префикс Bearer
-   
+    # Очищаем токен от пробелов, кавычек и случайного префикса Bearer
+    clean_token = token.strip().replace("Bearer ", "").strip("[]'\"")
 
-    
-        "Authorization": token,
+    return {
+        # Токен передается напрямую по спецификации ВАТС Tele2
+        "Authorization": clean_token,
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "Tele2-MoySklad-Middleware/1.0",
-
-
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    }
 
 
 def get_moysklad_phone_headers() -> dict[str, str]:
