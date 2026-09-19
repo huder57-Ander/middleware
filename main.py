@@ -173,7 +173,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("🚀 Запуск Tele2 -> МойСклад Phone API Middleware")
     tele2_client = httpx.AsyncClient(
-        http2=True,
+        http2=False,
         follow_redirects=True,
         timeout=httpx.Timeout(connect=20.0, read=90.0, write=30.0, pool=30.0),
     )
