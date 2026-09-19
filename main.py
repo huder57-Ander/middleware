@@ -107,15 +107,17 @@ def extract_first(data: Any, *paths: tuple[str, ...]) -> Any:
 
 
 def get_t2_headers(token: str) -> dict[str, str]:
-    clean_token = token.strip().replace("Bearer ", "").strip()
+    token = token.strip()
+    
+    # Убеждаемся, что токен содержит префикс Bearer
+    if not token.startswith("Bearer "):
+        token = f"Bearer {token}"
 
     return {
-        "Authorization": clean_token,
-        "Accept": "application/json, text/plain, */*",
+        "Authorization": token,
+        "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Origin": "https://ats2.t2.ru",
-        "Referer": "https://ats2.t2.ru/",
+        "User-Agent": "Tele2-MoySklad-Middleware/1.0",
     }
 
 
