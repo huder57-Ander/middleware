@@ -234,20 +234,36 @@ async def refresh_tele2_token() -> bool:
 # Стало:
 
 async def get_t2_employee_full_number(src_number):
-    url = "https://ats2.t2.ru/crm/openapi/employees"
+    url = "https://t2.ru"
     
-    # Достаем токен из переменных окружения Render
-    # Если вы не настраивали переменные среды, временно замените 
-    # os.getenv("T2_ACCESS_TOKEN") на ваш реальный токен в кавычках: "ваш_токен"
-    t2_token = os.getenv(TELE2_ACCESS_TOKEN)
+    # Читаем токен из правильной переменной окружения.
+    # Если она не задана, подставится пустая строка "", что предотвратит ошибку TypeError.
+    t2_token = os.getenv("TELE2_ACCESS_TOKEN") or ""
+
+    if not t2_token:
+        logger.error("Переменная окружения TELE2_ACCESS_TOKEN не задана в Render!")
 
     headers = {
-        # ОБЯЗАТЕЛЬНО для АТС Т2, иначе вернет 406 Not Acceptable
         "Accept": "application/json",
-        # По документации Т2 передается «чистый» токен БЕЗ слова Bearer
+        # Передаем токен в чистом виде (без слова Bearer), как требует инструкция Т2
         "Authorization": t2_token,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        
+        employees = response.json()
+        
+        # Защита: если сервер вернул не список, а словарь с ошибкой
+        if isinstance(employees, list):
+            for employee in employees:
+                # Ищем сотрудника по его внутреннему ID или имени
+                if str(employee.get("employeeId")) == str(src_number) or employee.get("name") == str(src_number):
+                    return employee.get("fullNumber")    
+# Если совпадений не найдено, возвращаем исходный короткий номер
+        return src_number
     
     async with httpx.AsyncClient() as client:
         response = await client.get(url, headers=headers)
