@@ -106,16 +106,13 @@ def extract_first(data: Any, *paths: tuple[str, ...]) -> Any:
     return None
 
 
-def get_t2_headers(token: str) -> dict[str, str]:
-    clean_token = (token or "").replace("Bearer ", "").strip()
+def get_t2_headers(token: str):
+    clean_token = token.strip().replace("Bearer ", "")
+
     return {
-        # Для текущего T2 ATS используем авторизацию без Bearer.
         "Authorization": clean_token,
         "Accept": "*/*",
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0",
-        "Origin": "https://ats2.t2.ru",
-        "Referer": "https://ats2.t2.ru/",
     }
 
 
