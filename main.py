@@ -107,18 +107,19 @@ def extract_first(data: Any, *paths: tuple[str, ...]) -> Any:
 
 
 def get_t2_headers(token: str) -> dict[str, str]:
-    # Очищаем токен от лишних пробелов, кавычек и случайного префикса Bearer
+    # Очищаем токен от пробелов, кавычек и случайного "Bearer "
     clean_token = token.strip().replace("Bearer ", "").strip("[]'\"")
 
     return {
-        # ВАТС Tele2 требует токен напрямую без слова Bearer
+        # По официальной инструкции Tele2 токен передаётся строго БЕЗ Bearer
         "Authorization": clean_token,
-        # Заголовок Accept обязателен, чтобы Nginx T2 не отдавал 406
+        # Заголовок Accept критически важен для Nginx T2, чтобы не получить 406
         "Accept": "application/json",
         "Content-Type": "application/json",
-        # Маскируем запрос под браузер для прохождения WAF/Nginx
+        # Имитируем браузер, чтобы проскочить фильтрацию WAF/Nginx
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
+
 
 
 def get_moysklad_phone_headers() -> dict[str, str]:
