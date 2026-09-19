@@ -122,8 +122,9 @@ def get_t2_headers(token: str) -> dict[str, str]:
 def get_moysklad_phone_headers():
     return {
         "Accept": "application/json;charset=utf-8",
-        "Content-Type": "application/json;charset=utf-8",
-        "Authorization": f"Bearer {os.getenv('MOYSKLAD_PHONE_API_KEY')}",
+        "Content-Type": "application/json",
+        "Lognex-Phone-Auth-Token": os.getenv("MOYSKLAD_PHONE_API_KEY"),
+        "Accept-Encoding": "gzip",
     }
 
 def remember_call(external_id: str) -> None:
