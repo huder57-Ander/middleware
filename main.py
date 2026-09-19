@@ -234,37 +234,45 @@ async def refresh_tele2_token() -> bool:
 # Стало:
 
 async def get_t2_employee_full_number(src_number):
+    # ВНИМАНИЕ: Здесь должен быть строго ats2.t2.ru, а не просто t2.ru
     url = "https://t2.ru"
     
-    # Читаем токен из правильной переменной окружения.
-    # Если она не задана, подставится пустая строка "", что предотвратит ошибку TypeError.
+    # Считываем токен из настроенной вами переменной в Render
     t2_token = os.getenv("TELE2_ACCESS_TOKEN") or ""
 
     if not t2_token:
-        logger.error("Переменная окружения TELE2_ACCESS_TOKEN не задана в Render!")
+        logger.error("Переменная окружения TELE2_ACCESS_TOKEN пустая или не задана в Render!")
 
     headers = {
         "Accept": "application/json",
-        # Передаем токен в чистом виде (без слова Bearer), как требует инструкция Т2
         "Authorization": t2_token,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
     
     async with httpx.AsyncClient() as client:
-        response = await client.get(url, headers=headers)
-        response.raise_for_status()
-        
-        employees = response.json()
-        
-        # Защита: если сервер вернул не список, а словарь с ошибкой
-        if isinstance(employees, list):
-            for employee in employees:
-                # Ищем сотрудника по его внутреннему ID или имени
-                if str(employee.get("employeeId")) == str(src_number) or employee.get("name") == str(src_number):
-                    return employee.get("fullNumber")    
-# Если совпадений не найдено, возвращаем исходный короткий номер
-        return src_number
-    
+        try:
+            response = await client.get(url, headers=headers, timeout=10.0)
+            response.raise_for_status()
+            
+            employees = response.json()
+            
+            # Если АТС вернула корректный список сотрудников
+            if isinstance(employees, list):
+                for employee in employees:
+                    if str(employee.get("employeeId")) == str(src_number) or employee.get("name") == str(src_number):
+                        return employee.get("fullNumber")
+            
+            logger.warning(f"Сотрудник со source {src_number} не найден в списке АТС Т2.")
+            return src_number
+
+        except httpx.HTTPStatusError as exc:
+            # Логируем ошибку, если Т2 отвечает кодами 503, 406 и т.д.
+            logger.error(f"Ошибка API Tele2 ({exc.response.status_code}) при запросе {exc.request.url}")
+            return src_number  # Возвращаем короткий номер, чтобы МойСклад не падал по 400 Bad Request
+            
+        except Exception as exc:
+            logger.error(f"Непредвиденная ошибка при запросе к АТС Tele2: {exc}")
+            return src_number    
     async with httpx.AsyncClient() as client:
         response = await client.get(url, headers=headers)
         response.raise_for_status()
