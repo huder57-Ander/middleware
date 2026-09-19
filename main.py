@@ -236,15 +236,19 @@ async def get_t2_employee_full_number(src_number):
     url = "https://ats2.t2.ru/crm/openapi/employees"
     
     headers = {
-        # Указываем, что ждем от сервера только JSON
-        "Accept": "application/json", 
-        # Некоторые защитные системы (WAF) T2 сбрасывают запросы без User-Agent
+        "Accept": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        # Если для этого эндпоинта нужен токен (например, X-Client-Id или Authorization), 
-        # убедитесь, что он тоже передается здесь:
-        # "Authorization": f"Bearer {YOUR_T2_TOKEN}" 
+        # Передаем токен авторизации
+        "Authorization": f"Bearer {T2_AUTH_TOKEN}", 
+        # Передаем обязательный ID клиента АТС, без которого сервер вернет 406
+        "X-Client-Id": T2_CLIENT_ID 
     }
     
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        return response.json()
+
     async with httpx.AsyncClient() as client:
         response = await client.get(url, headers=headers)
         response.raise_for_status()
