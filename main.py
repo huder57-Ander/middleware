@@ -110,15 +110,14 @@ def get_t2_headers(token: str) -> dict[str, str]:
     token = token.strip()
     
     # Убеждаемся, что токен содержит префикс Bearer
-    if not token.startswith("Bearer "):
-        token = f"Bearer {token}"
+   
 
-    return {
+    
         "Authorization": token,
         "Accept": "application/json",
         "Content-Type": "application/json",
         "User-Agent": "Tele2-MoySklad-Middleware/1.0",
-    }
+
 
 
 
