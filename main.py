@@ -107,14 +107,16 @@ def extract_first(data: Any, *paths: tuple[str, ...]) -> Any:
 
 
 def get_t2_headers(token: str) -> dict[str, str]:
-    # Очищаем токен от пробелов, кавычек и случайного префикса Bearer
+    # Очищаем токен от лишних пробелов, кавычек и случайного префикса Bearer
     clean_token = token.strip().replace("Bearer ", "").strip("[]'\"")
 
     return {
-        # Токен передается напрямую по спецификации ВАТС Tele2
+        # ВАТС Tele2 требует токен напрямую без слова Bearer
         "Authorization": clean_token,
+        # Заголовок Accept обязателен, чтобы Nginx T2 не отдавал 406
         "Accept": "application/json",
         "Content-Type": "application/json",
+        # Маскируем запрос под браузер для прохождения WAF/Nginx
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
 
