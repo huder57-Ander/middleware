@@ -111,7 +111,7 @@ def get_t2_headers(token: str) -> dict[str, str]:
     return {
         # Для текущего T2 ATS используем авторизацию без Bearer.
         "Authorization": clean_token,
-        "Accept": "application/json",
+        "Accept": "*/*",
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0",
         "Origin": "https://ats2.t2.ru",
@@ -119,13 +119,15 @@ def get_t2_headers(token: str) -> dict[str, str]:
     }
 
 
-def get_moysklad_phone_headers():
+def get_moysklad_phone_headers() -> dict[str, str]:
     return {
+        "Lognex-Phone-Auth-Token": MOYSKLAD_PHONE_API_KEY,
         "Accept": "application/json;charset=utf-8",
-        "Content-Type": "application/json",
-        "Lognex-Phone-Auth-Token": os.getenv("MOYSKLAD_PHONE_API_KEY"),
         "Accept-Encoding": "gzip",
+        "Content-Type": "application/json;charset=utf-8",
+        "User-Agent": "Tele2-MoySklad-PhoneAPI/1.0",
     }
+
 
 def remember_call(external_id: str) -> None:
     now = time.time()
@@ -240,46 +242,35 @@ async def call_tele2_outgoing(destination: Any, source: Any) -> tuple[bool, Any,
         return False, {"message": "Не указан внутренний номер source"}, 400
 
     url = f"{TELE2_API_URL}/call/outgoing"
+    params = {
+        "destination": clean_destination,
+        "source": clean_source,
+    }
 
-params = {
-    "destination": clean_destination,
-    "source": clean_source,
-}
-
-try:
-    response = await tele2_client.post(
-        url,
-        headers=get_t2_headers(TELE2_ACCESS_TOKEN),
-        params=params
-    )
-
-    if response.status_code in (401, 403) and await refresh_tele2_token():
+    try:
         response = await tele2_client.post(
             url,
             headers=get_t2_headers(TELE2_ACCESS_TOKEN),
-            params=params
+            params=params,
         )
+        if response.status_code in (401, 403) and await refresh_tele2_token():
+            response = await tele2_client.post(
+                url,
+                headers=get_t2_headers(TELE2_ACCESS_TOKEN),
+                params=params,
+            )
 
-    result = safe_json(response)
+        result = safe_json(response)
+        if response.status_code in (200, 201, 202):
+            logger.info("📞 Исходящий вызов %s -> %s", clean_source, clean_destination)
+            return True, result, response.status_code
 
-    if response.status_code in (200, 201, 202):
-        logger.info(
-            "📞 Исходящий вызов %s -> %s",
-            clean_source,
-            clean_destination
-        )
-        return True, result, response.status_code
+        logger.error("T2 outgoing error %s %s", response.status_code, response.text[:300])
+        return False, result, response.status_code
+    except Exception as exc:
+        logger.exception("Ошибка исходящего вызова T2")
+        return False, {"message": str(exc)}, 500
 
-    logger.error(
-        "T2 outgoing error %s %s",
-        response.status_code,
-        response.text[:300]
-    )
-    return False, result, response.status_code
-
-except Exception as exc:
-    logger.exception("Ошибка исходящего вызова T2")
-    return False, {"message": str(exc)}, 500
 
 # ============================================================
 # MOYSKLAD PHONE API CLIENT
