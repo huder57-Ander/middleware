@@ -491,6 +491,8 @@ async def moysklad_phone_provider(
 ):
     try:
         payload = await request.json()
+        
+        logger.info("📥 MoySklad payload: %s", payload)
         if not isinstance(payload, dict):
             return JSONResponse(status_code=400, content={"status": "error", "message": "Ожидался JSON-объект"})
 
