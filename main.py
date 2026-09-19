@@ -239,9 +239,9 @@ async def get_t2_employee_full_number(src_number):
         "Accept": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         # Передаем токен авторизации
-        "Authorization": f"Bearer {T2_AUTH_TOKEN}", 
+        "Authorization": TELE2_ACCESS_TOKEN, 
         # Передаем обязательный ID клиента АТС, без которого сервер вернет 406
-        "X-Client-Id": T2_CLIENT_ID 
+        "X-Client-Id": destNumber
     }
     
     async with httpx.AsyncClient() as client:
