@@ -240,28 +240,46 @@ async def call_tele2_outgoing(destination: Any, source: Any) -> tuple[bool, Any,
         return False, {"message": "Не указан внутренний номер source"}, 400
 
     url = f"{TELE2_API_URL}/call/outgoing"
-    body = {
-        # Сохраняем формат, который использовался в рабочем middleware T2.
-        "destination": clean_destination,
-        "source": clean_source,
-    }
 
-    try:
-        response = await tele2_client.post(url, headers=get_t2_headers(TELE2_ACCESS_TOKEN), json=body)
-        if response.status_code in (401, 403) and await refresh_tele2_token():
-            response = await tele2_client.post(url, headers=get_t2_headers(TELE2_ACCESS_TOKEN), json=body)
+params = {
+    "destination": clean_destination,
+    "source": clean_source,
+}
 
-        result = safe_json(response)
-        if response.status_code in (200, 201, 202):
-            logger.info("📞 Исходящий вызов %s -> %s", clean_source, clean_destination)
-            return True, result, response.status_code
+try:
+    response = await tele2_client.post(
+        url,
+        headers=get_t2_headers(TELE2_ACCESS_TOKEN),
+        params=params
+    )
 
-        logger.error("T2 outgoing error %s %s", response.status_code, response.text[:300])
-        return False, result, response.status_code
-    except Exception as exc:
-        logger.exception("Ошибка исходящего вызова T2")
-        return False, {"message": str(exc)}, 500
+    if response.status_code in (401, 403) and await refresh_tele2_token():
+        response = await tele2_client.post(
+            url,
+            headers=get_t2_headers(TELE2_ACCESS_TOKEN),
+            params=params
+        )
 
+    result = safe_json(response)
+
+    if response.status_code in (200, 201, 202):
+        logger.info(
+            "📞 Исходящий вызов %s -> %s",
+            clean_source,
+            clean_destination
+        )
+        return True, result, response.status_code
+
+    logger.error(
+        "T2 outgoing error %s %s",
+        response.status_code,
+        response.text[:300]
+    )
+    return False, result, response.status_code
+
+except Exception as exc:
+    logger.exception("Ошибка исходящего вызова T2")
+    return False, {"message": str(exc)}, 500
 
 # ============================================================
 # MOYSKLAD PHONE API CLIENT
