@@ -500,41 +500,122 @@ async def moysklad_phone_provider(
             logger.warning("Неверная подпись запроса МойСклад Phone API")
             return JSONResponse(status_code=401, content={"status": "error", "message": "Invalid signature"})
 
-        src_number = payload.get("srcNumber") or payload.get("source") or payload.get("extension")
-        dest_number = payload.get("destNumber") or payload.get("destination") or payload.get("phone")
-        uid = payload.get("uid") or src_number
+        src_number = (
+    payload.get("srcNumber")
+    or payload.get("source")
+    or payload.get("extension")
+)
 
-        ok, result, status_code = await call_tele2_outgoing(dest_number, src_number)
-        if ok:
-            # Для провайдера МойСклад достаточно успешного HTTP-ответа.
-            return {"status": "ok", "uid": uid, "data": result}
+dest_number = (
+    payload.get("destNumber")
+    or payload.get("destination")
+    or payload.get("phone")
+)
 
-        return JSONResponse(
-            status_code=502 if status_code >= 500 or status_code in (401, 403) else status_code,
-            content={"status": "error", "uid": uid, "detail": result},
-        )
-    except Exception as exc:
-        logger.exception("Ошибка provider endpoint МойСклад")
-        return JSONResponse(status_code=400, content={"status": "error", "detail": str(exc)})
+uid = payload.get("uid") or src_number
 
+# Преобразуем внутренний номер МойСклад
+# в полный номер сотрудника T2
+t2_source_number = await get_t2_employee_full_number(src_number)
+
+if not t2_source_number:
+    return JSONResponse(
+        status_code=404,
+        content={
+            "status": "error",
+            "uid": uid,
+            "detail": f"T2 employee not found: {src_number}",
+        },
+    )
+
+ok, result, status_code = await call_tele2_outgoing(
+    dest_number,
+    t2_source_number,
+)
+
+if ok:
+    # Для провайдера МойСклад достаточно успешного HTTP-ответа.
+    return {
+        "status": "ok",
+        "uid": uid,
+        "data": result,
+    }
+
+return JSONResponse(
+    status_code=(
+        502
+        if status_code >= 500 or status_code in (401, 403)
+        else status_code
+    ),
+    content={
+        "status": "error",
+        "uid": uid,
+        "detail": result,
+    },
+)
+
+except Exception as exc:
+    logger.exception("Ошибка provider endpoint МойСклад")
+
+    return JSONResponse(
+        status_code=400,
+        content={
+            "status": "error",
+            "detail": str(exc),
+        },
+    )
 
 # ============================================================
 # MANUAL OUTGOING CALL ENDPOINT (OPTIONAL)
 # ============================================================
 
 @app.post("/api/make-call")
-async def make_outgoing_call(payload: dict[str, Any], x_api_key: str | None = Header(default=None)):
+async def make_outgoing_call(
+    payload: dict[str, Any],
+    x_api_key: str | None = Header(default=None)
+):
     if CALL_API_KEY and x_api_key != CALL_API_KEY:
-        return JSONResponse(status_code=401, content={"status": "error", "message": "Unauthorized"})
+        return JSONResponse(
+            status_code=401,
+            content={
+                "status": "error",
+                "message": "Unauthorized"
+            }
+        )
 
     phone = payload.get("phone") or payload.get("destination")
     source = payload.get("source") or payload.get("user")
-    ok, result, status_code = await call_tele2_outgoing(phone, source)
+
+    # Если передан внутренний номер, находим полный номер T2
+    t2_source_number = await get_t2_employee_full_number(source)
+
+    if not t2_source_number:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "status": "error",
+                "detail": f"T2 employee not found: {source}"
+            }
+        )
+
+    ok, result, status_code = await call_tele2_outgoing(
+        phone,
+        t2_source_number
+    )
+
     if ok:
-        return {"status": "success", "data": result}
-    return JSONResponse(status_code=status_code if status_code < 500 else 502, content={"status": "error", "detail": result})
+        return {
+            "status": "success",
+            "data": result
+        }
 
-
+    return JSONResponse(
+        status_code=status_code if status_code < 500 else 502,
+        content={
+            "status": "error",
+            "detail": result
+        }
+    )
 # ============================================================
 # DIAGNOSTICS
 # ============================================================
