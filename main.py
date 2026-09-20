@@ -176,10 +176,13 @@ async def lifespan(app: FastAPI):
 
     logger.info("🚀 Запуск Tele2 -> МойСклад Phone API Middleware")
     tele2_client = httpx.AsyncClient(
-        http2=False,
-        follow_redirects=True,
-        timeout=httpx.Timeout(connect=20.0, read=90.0, write=30.0, pool=30.0),
-    )
+    headers={
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    },
+    timeout=10.0,
+)
     moysklad_client = httpx.AsyncClient(
         timeout=httpx.Timeout(connect=20.0, read=30.0, write=30.0, pool=30.0),
     )
@@ -230,7 +233,7 @@ async def refresh_tele2_token() -> bool:
     return False
 
 
-async def get_t2_employee_full_number(short_number: str):
+async def get_t2_employee_full_number(short_number: str) -> str | None:
     """Находит fullNumber сотрудника T2 по его shortNumber."""
     if tele2_client is None:
         logger.error("T2 client is not initialized")
@@ -243,17 +246,17 @@ async def get_t2_employee_full_number(short_number: str):
 
     url = f"{TELE2_API_URL}/employees"
 
-    try:
-        response = await tele2_client.get(
-            url,
-            headers=get_t2_headers(TELE2_ACCESS_TOKEN),
-        )
+    # Формируем гарантированно правильные заголовки
+    headers = get_t2_headers(TELE2_ACCESS_TOKEN)
 
+    try:
+        # Важно: передаем заголовки явным образом
+        response = await tele2_client.get(url, headers=headers)
+
+        # Если токен истек, обновляем его и повторяем запрос с ОБНОВЛЕННЫМИ заголовками
         if response.status_code in (401, 403) and await refresh_tele2_token():
-            response = await tele2_client.get(
-                url,
-                headers=get_t2_headers(TELE2_ACCESS_TOKEN),
-            )
+            headers = get_t2_headers(TELE2_ACCESS_TOKEN)
+            response = await tele2_client.get(url, headers=headers)
 
         if not response.is_success:
             logger.error(
@@ -265,6 +268,7 @@ async def get_t2_employee_full_number(short_number: str):
 
         employees = safe_json(response)
 
+        # Обработка оберток ответа (data, content, employees)
         if isinstance(employees, dict):
             employees = (
                 employees.get("employees")
@@ -274,16 +278,18 @@ async def get_t2_employee_full_number(short_number: str):
             )
 
         if not isinstance(employees, list):
-            logger.error("Неожиданный формат ответа T2 /employees: %s", type(employees).__name__)
+            logger.error(
+                "Неожиданный формат ответа T2 /employees: %s",
+                type(employees).__name__,
+            )
             return None
 
+        # Сопоставление короткого номера с полным
         for employee in employees:
             if not isinstance(employee, dict):
                 continue
 
-            employee_short = str(
-                employee.get("shortNumber") or ""
-            ).strip()
+            employee_short = str(employee.get("shortNumber") or "").strip()
 
             if employee_short == short_number:
                 full_number = employee.get("fullNumber")
@@ -305,7 +311,6 @@ async def get_t2_employee_full_number(short_number: str):
     except Exception:
         logger.exception("Ошибка поиска сотрудника T2: %s", short_number)
         return None
-
 
 async def call_tele2_outgoing(destination: Any, source: Any) -> tuple[bool, Any, int]:
     if tele2_client is None:
