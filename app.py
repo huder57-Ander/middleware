@@ -1,5 +1,5 @@
 """Посредник: T2 ВАТС (ats2.tele2.ru/crm/openapi) <-> МойСклад Phone API 1.0.
-
+ 
 Что делает:
   * МойСклад -> T2: кнопка «Позвонить» (POST /moysklad/callRequest -> T2 /call/outgoing);
   * T2 -> МойСклад: у T2 нет вебхуков, поэтому опрашиваем /monitoring/calls,
