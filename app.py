@@ -1,9 +1,9 @@
 """Посредник: T2 ВАТС (ats2.tele2.ru/crm/openapi) <-> МойСклад Phone API 1.0.
- 
+
 Что делает:
   * МойСклад -> T2: кнопка «Позвонить» (POST /moysklad/callRequest -> T2 /call/outgoing);
   * T2 -> МойСклад: у T2 нет вебхуков, поэтому опрашиваем /monitoring/calls,
-    создаём звонок и показываем/скрываем карточку (SHOW / HIDE); 
+    создаём звонок и показываем/скрываем карточку (SHOW / HIDE);
   * история и записи: опрашиваем /call-records/info, дописываем recordUrl
     (ссылка идёт через наш прокси /record/..., т.к. T2 отдаёт файл только с токеном).
 
@@ -31,7 +31,6 @@ from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
-logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("bridge")
 
 # ---------------------------------------------------------------- настройки
@@ -162,7 +161,7 @@ async def load_employees():
             full[ext] = fn
     emp_by_num.clear(); emp_by_num.update(by)
     emp_full.clear(); emp_full.update(full)
-    log.info("сотрудников T2: %d", len(full))
+    log.info("сотрудников T2: %d, добавочные: %s", len(full), sorted(full))
 
 
 def resolve(caller, called):
@@ -408,14 +407,24 @@ async def call_request(request: Request):
                     request.headers.get("Lognex-Content-MD5"), list(body))
         if SIGNATURE_MODE == "enforce":
             raise HTTPException(403, "bad signature")
-    source = emp_full.get(src, src) if CLICK_SOURCE == "full" else src
-    try:
-        await t2("POST", "/call/outgoing", params={"source": source, "destination": dst})
-    except httpx.HTTPStatusError as e:
-        log.error("T2 click2call: %s %s", e.response.status_code, e.response.text[:300])
-        raise HTTPException(502, "T2 error")
-    log.info("click2call: %s -> %s", source, dst)
-    return {"status": "ok"}
+    # T2 не уточняет, какой номер сотрудника ждёт source: пробуем полный и короткий (порядок задаёт CLICK_SOURCE_MODE)
+    full = emp_full.get(src)
+    order = [full, src] if CLICK_SOURCE == "full" else [src, full]
+    candidates = [c for i, c in enumerate(order) if c and c not in order[:i]]
+    for source in candidates:
+        try:
+            await t2("POST", "/call/outgoing", params={"source": source, "destination": dst})
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:  # сотрудник не найден - пробуем другой формат
+                log.warning("click2call: source=%r не подошёл, пробуем следующий формат", source)
+                continue
+            log.error("T2 click2call: %s %s", e.response.status_code, e.response.text[:300])
+            raise HTTPException(502, "T2 error")
+        log.info("click2call: source=%r -> %s", source, dst)
+        return {"status": "ok"}
+    log.error("click2call: T2 не нашёл сотрудника ни по одному из форматов %s (srcNumber из МоегоСклада=%r)",
+              candidates, src)
+    raise HTTPException(502, "T2: employee not found")
 
 
 # ---------------------------------------------------------------- прокси записей
