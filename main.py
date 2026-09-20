@@ -10,6 +10,7 @@
 Запускать в ОДНОМ процессе (опрос живёт внутри приложения):
   uvicorn main:app --host 0.0.0.0 --port $PORT
 """
+
 import asyncio
 import hashlib
 import hmac
