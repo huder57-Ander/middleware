@@ -1,13 +1,11 @@
 meta:
-  environment: python
-  toolchain:
-    name: pip
-    version: 3.11
-
-build:
-  requirementsPath: requirements.txt
-
-run:
-  persistenceMounted: /data
-  scriptName: app.py
-  command: uvicorn app:app --host 0.0.0.0 --port 80
+     environment: python
+     toolchain:
+       name: pip
+       version: 3.12
+   build:
+     requirementsPath: requirements.txt
+   run:
+     persistenceMount: /data
+     containerPort: 80
+     command: uvicorn main:app --host 0.0.0.0 --port 80
