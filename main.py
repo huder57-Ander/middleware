@@ -1,705 +1,439 @@
-import os
-import time
-import json
-import hmac
+"""Посредник: T2 ВАТС (ats2.tele2.ru/crm/openapi) <-> МойСклад Phone API 1.0.
+
+Что делает:
+  * МойСклад -> T2: кнопка «Позвонить» (POST /moysklad/callRequest -> T2 /call/outgoing);
+  * T2 -> МойСклад: у T2 нет вебхуков, поэтому опрашиваем /monitoring/calls,
+    создаём звонок и показываем/скрываем карточку (SHOW / HIDE);
+  * история и записи: опрашиваем /call-records/info, дописываем recordUrl
+    (ссылка идёт через наш прокси /record/..., т.к. T2 отдаёт файл только с токеном).
+
+Запускать в ОДНОМ процессе (опрос живёт внутри приложения):
+  uvicorn main:app --host 0.0.0.0 --port $PORT
+"""
+import asyncio
 import hashlib
+import hmac
+import json
 import logging
-from datetime import datetime, timezone
+import os
+import re
+from collections import deque
 from contextlib import asynccontextmanager
-from typing import Any
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import FastAPI, Request, BackgroundTasks, Header
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
-logger = logging.getLogger("tele2-moysklad-phone")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+log = logging.getLogger("bridge")
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
+# ---------------------------------------------------------------- настройки
+T2_BASE = os.getenv("T2_BASE", "https://ats2.tele2.ru/crm/openapi")
+MS_BASE = "https://api.moysklad.ru/api/phone/1.0"
+MS_KEY = os.environ["MS_PHONE_KEY"]  # ключ из приложения Phone API в МоёмСкладе
+PUBLIC_URL = os.getenv("PUBLIC_URL", "https://middleware-hudia.onrender.com").rstrip("/")
+RECORD_SECRET = os.getenv("RECORD_SECRET", MS_KEY)  # для подписи ссылок на записи
+TOKEN_FILE = Path(os.getenv("TOKEN_STORE_PATH", "t2_tokens.json"))
+PROCESSED_FILE = TOKEN_FILE.with_name("processed_records.json")
+POLL_SEC = float(os.getenv("POLL_INTERVAL", "2"))  # опрос текущих звонков
+RECORDS_SEC = int(os.getenv("RECORDS_INTERVAL", "60"))  # опрос истории/записей
+RECORDS_LOOKBACK_MIN = int(os.getenv("RECORDS_LOOKBACK_MIN", "10"))
+TZ = ZoneInfo(os.getenv("TZ_NAME", "Europe/Moscow"))
+CLICK_SOURCE = os.getenv("CLICK_SOURCE_MODE", "full")  # full | short: что слать в T2 как source
+SIGNATURE_MODE = os.getenv("SIGNATURE_MODE", "enforce")  # enforce | log (только для отладки)
 
-TELE2_API_URL = os.getenv(
-    "TELE2_API_URL",
-    "https://ats2.t2.ru/crm/openapi",
-).strip().strip("[]'\"").rstrip("/")
-
-TELE2_ACCESS_TOKEN = os.getenv("TELE2_ACCESS_TOKEN", "").strip()
-TELE2_REFRESH_TOKEN = os.getenv("TELE2_REFRESH_TOKEN", "").strip()
-
-# MoySklad Phone API (не JSON API)
-MOYSKLAD_PHONE_API_URL = os.getenv(
-    "MOYSKLAD_PHONE_API_URL",
-    "https://api.moysklad.ru/api/phone/1.0",
-).strip().rstrip("/")
-MOYSKLAD_PHONE_API_KEY = os.getenv("MOYSKLAD_PHONE_API_KEY", "").strip()
-
-# Этот URL нужно указать в поле «Адрес провайдера телефонии» в МойСклад.
-PROVIDER_URL = os.getenv(
-    "PROVIDER_URL",
-    "https://middleware-hudia.onrender.com/api/moysklad/phone",
-).strip().rstrip("/")
-
-# Старый внешний endpoint для ручного вызова, если он используется.
-CALL_API_KEY = os.getenv("CALL_API_KEY", "").strip()
-
-tele2_client: httpx.AsyncClient | None = None
-moysklad_client: httpx.AsyncClient | None = None
-
-# Локальное соответствие externalId -> внутренний id звонка МойСклад.
-# Для устойчивости обновление также выполняется по externalId.
-call_cache: dict[str, float] = {}
-CALL_CACHE_TTL = 86400
+http = httpx.AsyncClient(timeout=15)
+MS_HEADERS = {"Lognex-Phone-Auth-Token": MS_KEY, "Accept": "application/json;charset=utf-8"}
 
 
-# ============================================================
-# COMMON HELPERS
-# ============================================================
-
-def safe_json(response: httpx.Response) -> Any:
-    try:
-        return response.json()
-    except ValueError:
-        return response.text
+def now() -> datetime:
+    return datetime.now(TZ)
 
 
-def normalize_phone(phone: Any) -> str | None:
-    if phone is None:
+def ms_time(dt: datetime) -> str:
+    return dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
+
+
+def norm(num) -> str | None:
+    """Цифры; 8XXXXXXXXXX и 10 цифр приводим к 7XXXXXXXXXX. Короткие номера остаются как есть."""
+    if not num:
         return None
-    digits = "".join(ch for ch in str(phone) if ch.isdigit())
-    if digits.startswith("8") and len(digits) == 11:
-        digits = "7" + digits[1:]
-    if not digits:
+    d = re.sub(r"\D", "", str(num))
+    if len(d) == 11 and d[0] in "78":
+        return "7" + d[1:]
+    if len(d) == 10:
+        return "7" + d
+    return d or None
+
+
+def plus(num) -> str | None:
+    n = norm(num)
+    return f"+{n}" if n and len(n) >= 10 else n
+
+
+# ---------------------------------------------------------------- токены T2
+class Tokens:
+    """access живёт сутки, refresh 7 суток. Новую пару обязательно сохраняем на диск."""
+
+    def __init__(self):
+        self.access = os.getenv("T2_ACCESS_TOKEN", "")
+        self.refresh = os.getenv("T2_REFRESH_TOKEN", "")
+        self.seed = self.refresh  # с какого токена из env начинали
+        self.lock = asyncio.Lock()
+        if TOKEN_FILE.exists():
+            try:
+                d = json.loads(TOKEN_FILE.read_text())
+                # файл используем, только если в env не подложили новые токены из кабинета АТС
+                if d.get("seed") == self.seed:
+                    self.access, self.refresh = d["access"], d["refresh"]
+            except Exception:
+                log.exception("не удалось прочитать %s", TOKEN_FILE)
+
+    def save(self):
+        try:
+            TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+            TOKEN_FILE.write_text(json.dumps(
+                {"access": self.access, "refresh": self.refresh, "seed": self.seed}))
+        except Exception:
+            log.exception("не удалось сохранить токены (нужен постоянный диск!)")
+
+    async def refresh_now(self, stale: str | None = None):
+        async with self.lock:
+            if stale is not None and self.access != stale:
+                return  # уже обновили параллельным запросом
+            r = await http.put(f"{T2_BASE}/authorization/refresh/token",
+                               headers={"Authorization": self.refresh})
+            r.raise_for_status()
+            d = r.json()
+            self.access = d["accessToken"]
+            self.refresh = d.get("refreshToken") or self.refresh
+            self.save()
+            log.info("токены T2 обновлены")
+
+
+tokens = Tokens()
+
+
+async def t2(method: str, path: str, **kw) -> httpx.Response:
+    for attempt in (1, 2):
+        token = tokens.access
+        r = await http.request(method, T2_BASE + path, headers={"Authorization": token}, **kw)
+        if r.status_code in (401, 403) and attempt == 1:
+            await tokens.refresh_now(stale=token)
+            continue
+        r.raise_for_status()
+        return r
+    raise RuntimeError("unreachable")
+
+
+# ---------------------------------------------------------------- сотрудники
+emp_by_num: dict[str, str] = {}  # любой номер сотрудника (короткий/полный) -> добавочный
+emp_full: dict[str, str] = {}  # добавочный -> полный номер
+
+
+async def load_employees():
+    data = (await t2("GET", "/employees")).json()
+    if isinstance(data, dict):
+        data = [data]
+    by, full = {}, {}
+    for e in data:
+        short = str(e.get("shortNumber") or "").strip()
+        fn = norm(e.get("fullNumber"))
+        ext = short or fn
+        if not ext:
+            continue
+        if short:
+            by[short] = ext
+        if fn:
+            by[fn] = ext
+            full[ext] = fn
+    emp_by_num.clear(); emp_by_num.update(by)
+    emp_full.clear(); emp_full.update(full)
+    log.info("сотрудников T2: %d", len(full))
+
+
+def resolve(caller, called):
+    """-> (добавочный, внешний номер, входящий?) или None (внутренний / ещё не маршрутизирован)."""
+    a = emp_by_num.get(norm(caller) or "")
+    b = emp_by_num.get(norm(called) or "")
+    if a and b:
         return None
-    return digits
-
-
-def phone_for_moysklad(phone: Any) -> str | None:
-    normalized = normalize_phone(phone)
-    if not normalized:
-        return None
-    if normalized.startswith("7") and len(normalized) == 11:
-        return "+" + normalized
-    return normalized if normalized.startswith("+") else "+" + normalized
-
-
-def now_moysklad() -> str:
-    # Формат, указанный в документации Phone API: yyyy-MM-dd HH:mm:ss.SSS
-    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-
-
-def extract_first(data: Any, *paths: tuple[str, ...]) -> Any:
-    if not isinstance(data, dict):
-        return None
-    for path in paths:
-        value: Any = data
-        for key in path:
-            if not isinstance(value, dict):
-                value = None
-                break
-            value = value.get(key)
-        if value not in (None, ""):
-            return value
+    if a:
+        return a, called, False
+    if b:
+        return b, caller, True
     return None
 
 
-def get_t2_headers(token: str) -> dict[str, str]:
-    clean_token = (token or "").replace("Bearer ", "").strip()
-    return {
-        # Для текущего T2 ATS используем авторизацию без Bearer.
-        "Authorization": clean_token,
-        "Accept": "*/*",
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0",
-        "Origin": "https://ats2.t2.ru",
-        "Referer": "https://ats2.t2.ru/",
-    }
+# ---------------------------------------------------------------- МойСклад
+async def ms(method: str, path: str, body=None):
+    try:
+        r = await http.request(method, MS_BASE + path, json=body, headers=MS_HEADERS)
+        if r.status_code >= 400:
+            log.error("МойСклад %s %s -> %s %s", method, path, r.status_code, r.text[:300])
+        return r
+    except httpx.HTTPError:
+        log.exception("МойСклад недоступен: %s %s", method, path)
 
 
-def get_moysklad_phone_headers() -> dict[str, str]:
-    return {
-        "Lognex-Phone-Auth-Token": MOYSKLAD_PHONE_API_KEY,
-        "Accept": "application/json;charset=utf-8",
-        "Accept-Encoding": "gzip",
-        "Content-Type": "application/json;charset=utf-8",
-        "User-Agent": "Tele2-MoySklad-PhoneAPI/1.0",
-    }
+@dataclass
+class Call:
+    ext_id: str
+    ext: str
+    number: str
+    incoming: bool
+    start: datetime
+    seq: int = 1
+    missing: int = 0
+    end: datetime | None = None
+    has_record: bool = False
 
 
-def remember_call(external_id: str) -> None:
-    now = time.time()
-    expired = [key for key, value in call_cache.items() if now - value > CALL_CACHE_TTL]
-    for key in expired:
-        call_cache.pop(key, None)
-    call_cache[external_id] = now
-    if len(call_cache) > 10000:
-        call_cache.pop(next(iter(call_cache)), None)
+live: dict[tuple, Call] = {}
+done: deque[Call] = deque(maxlen=500)
 
 
-def md5_upper(value: str) -> str:
-    return hashlib.md5(value.encode("utf-8")).hexdigest().upper()
+async def ms_create(c: Call):
+    await ms("POST", "/call", {
+        "externalId": c.ext_id, "number": plus(c.number), "extension": c.ext,
+        "isIncoming": c.incoming, "startTime": ms_time(c.start),
+        "events": [{"eventType": "SHOW", "extension": c.ext, "sequence": 1}],
+    })
 
 
-def validate_moysklad_signature(payload: dict[str, Any], signature: str | None) -> bool:
-    """Проверка Lognex-Content-MD5.
-
-    В документации указано: MD5 от ключа доступа и значений параметров запроса.
-    Допускаем несколько вариантов порядка значений, чтобы не зависеть от порядка
-    сериализации полей провайдером.
-    """
-    if not MOYSKLAD_PHONE_API_KEY:
-        logger.warning("MOYSKLAD_PHONE_API_KEY не задан — подпись не проверяется")
-        return True
-    if not signature:
-        return False
-
-    signature = signature.strip().upper()
-    values = [str(payload.get(key, "")) for key in ("srcNumber", "destNumber", "uid")]
-    candidates = {
-        md5_upper(MOYSKLAD_PHONE_API_KEY + "".join(values)),
-        md5_upper(MOYSKLAD_PHONE_API_KEY + "".join(sorted(values))),
-        md5_upper(MOYSKLAD_PHONE_API_KEY + "".join(str(v) for v in payload.values())),
-    }
-    return any(hmac.compare_digest(signature, candidate) for candidate in candidates)
+async def ms_finish(c: Call):
+    c.end, c.seq = now(), c.seq + 1
+    await ms("PUT", f"/call/extid/{c.ext_id}", {
+        "endTime": ms_time(c.end),
+        "events": [{"eventType": "HIDE", "extension": c.ext, "sequence": c.seq}],
+    })
+    done.append(c)
 
 
-# ============================================================
-# LIFESPAN
-# ============================================================
+# ---------------------------------------------------------------- опрос текущих звонков
+async def poll_calls():
+    while True:
+        try:
+            calls = (await t2("GET", "/monitoring/calls")).json() or []
+            seen = set()
+            for c in calls:
+                caller = c.get("callerNumberFull") or c.get("callerNumberShort")
+                called = c.get("calledNumberFull") or c.get("calledNumberShort")
+                r = resolve(caller, called)
+                if not r:
+                    continue
+                ext, number, incoming = r
+                key = (norm(caller), norm(called))
+                seen.add(key)
+                if key in live:
+                    live[key].missing = 0
+                    continue
+                start = now()
+                call = Call(f"t2-{int(start.timestamp())}-{key[0]}-{key[1]}",
+                            ext, number, incoming, start)
+                live[key] = call
+                log.info("новый звонок %s ext=%s number=%s incoming=%s", call.ext_id, ext, number, incoming)
+                await ms_create(call)
+            for key, call in list(live.items()):
+                if key in seen:
+                    continue
+                call.missing += 1  # 2 опроса подряд без звонка = завершён (защита от «мигания»)
+                if call.missing >= 2:
+                    del live[key]
+                    log.info("звонок завершён %s", call.ext_id)
+                    await ms_finish(call)
+        except Exception:
+            log.exception("ошибка опроса /monitoring/calls")
+            await asyncio.sleep(5)
+        await asyncio.sleep(POLL_SEC)
+
+
+# ---------------------------------------------------------------- история и записи
+processed: deque[str] = deque(maxlen=1000)
+if PROCESSED_FILE.exists():
+    try:
+        processed.extend(json.loads(PROCESSED_FILE.read_text()))
+    except Exception:
+        log.exception("не удалось прочитать %s", PROCESSED_FILE)
+
+
+def save_processed():
+    try:
+        PROCESSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PROCESSED_FILE.write_text(json.dumps(list(processed)))
+    except Exception:
+        log.exception("не удалось сохранить список обработанных записей")
+
+
+def sign(name: str) -> str:
+    return hmac.new(RECORD_SECRET.encode(), name.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def record_url(name: str) -> str:
+    return f"{PUBLIC_URL}/record/{quote(name, safe='')}?sig={sign(name)}"
+
+
+def parse_ts(v) -> datetime:
+    if v is None:
+        return now()
+    if isinstance(v, (int, float)):
+        return datetime.fromtimestamp(v / 1000 if v > 1e12 else v, TZ)
+    return datetime.fromisoformat(str(v).replace("Z", "+00:00")).astimezone(TZ)
+
+
+async def handle_record(row: dict):
+    name = row.get("recordName")
+    if not name or name in processed:
+        return
+    caller = row.get("callerNumber") or (row.get("callerPart") or {}).get("fullNumber")
+    callee = row.get("calleeNumber") or (row.get("calleePart") or {}).get("fullNumber")
+    r = resolve(caller, callee)
+    if not r:
+        log.warning("запись %s: не нашли сотрудника среди %s / %s", name, caller, callee)
+        return
+    ext, number, incoming = r
+    ts = parse_ts(row.get("callTimestamp") or row.get("callDate"))
+    dur = float(row.get("conversationDuration") or row.get("callDuration") or 0)
+    url = record_url(name)
+
+    best = None
+    for d in done:
+        if d.has_record or d.ext != ext or norm(d.number) != norm(number):
+            continue
+        diff = abs((d.start - ts).total_seconds())
+        if diff < 600 and (best is None or diff < best[0]):
+            best = (diff, d)
+
+    if best:
+        best[1].has_record = True
+        await ms("PUT", f"/call/extid/{best[1].ext_id}", {"recordUrl": [url]})
+    else:  # звонок не увидел опрос (короткий и т.п.) - создаём из записи
+        await ms("POST", "/call", {
+            "externalId": f"t2-rec-{name}", "number": plus(number), "extension": ext,
+            "isIncoming": incoming, "startTime": ms_time(ts),
+            "endTime": ms_time(ts + timedelta(seconds=dur)), "recordUrl": [url],
+        })
+    processed.append(name)
+    save_processed()
+
+
+async def poll_records():
+    last = now() - timedelta(minutes=RECORDS_LOOKBACK_MIN)
+    while True:
+        await asyncio.sleep(RECORDS_SEC)
+        try:
+            end = now()
+            rows = (await t2("GET", "/call-records/info", params={
+                "start": (last - timedelta(minutes=2)).isoformat(timespec="seconds"),
+                "end": end.isoformat(timespec="seconds"),
+            })).json() or []
+            for row in rows:
+                await handle_record(row)
+            last = end
+        except Exception:
+            log.exception("ошибка опроса /call-records/info")
+
+
+# ---------------------------------------------------------------- фоновые задачи
+async def token_loop():
+    while True:
+        await asyncio.sleep(12 * 3600)
+        try:
+            await tokens.refresh_now()
+        except Exception:
+            log.exception("не удалось обновить токены T2 - сгенерируйте новые в кабинете АТС")
+
+
+async def employees_loop():
+    while True:
+        try:
+            await load_employees()
+        except Exception:
+            log.exception("не удалось загрузить сотрудников")
+            await asyncio.sleep(15)
+            continue
+        await asyncio.sleep(600)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global tele2_client, moysklad_client
+    tasks = [asyncio.create_task(f()) for f in (token_loop, employees_loop, poll_calls, poll_records)]
+    yield
+    for t in tasks:
+        t.cancel()
+    await http.aclose()
 
-    logger.info("🚀 Запуск Tele2 -> МойСклад Phone API Middleware")
-    tele2_client = httpx.AsyncClient(
-        http2=False,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        },
-        timeout=10.0,
-    )
-    moysklad_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=20.0, read=30.0, write=30.0, pool=30.0),
-    )
 
-    try:
-        yield
-    finally:
-        logger.info("🛑 Остановка Middleware")
-        if tele2_client is not None:
-            await tele2_client.aclose()
-        if moysklad_client is not None:
-            await moysklad_client.aclose()
+app = FastAPI(lifespan=lifespan)
 
 
-app = FastAPI(
-    title="Tele2 - MoySklad Phone API Middleware",
-    version="2.0.0",
-    lifespan=lifespan,
-)
-
-
-# ============================================================
-# TELE2
-# ============================================================
-
-async def refresh_tele2_token() -> bool:
-    global TELE2_ACCESS_TOKEN
-
-    if not TELE2_REFRESH_TOKEN or tele2_client is None:
-        logger.warning("Нет TELE2_REFRESH_TOKEN или HTTP-клиента")
-        return False
-
-    url = f"{TELE2_API_URL}/authorization/refresh/token"
-    try:
-        response = await tele2_client.put(
-            url,
-            headers=get_t2_headers(TELE2_REFRESH_TOKEN),
-        )
-        data = safe_json(response)
-        if response.status_code == 200 and isinstance(data, dict) and data.get("accessToken"):
-            TELE2_ACCESS_TOKEN = str(data["accessToken"])
-            logger.info("🟢 Access Token T2 обновлён")
-            return True
-
-        logger.error("Ошибка refresh T2 %s %s", response.status_code, response.text[:300])
-    except Exception:
-        logger.exception("Ошибка обновления T2 token")
-    return False
-
-
-async def call_tele2_outgoing(destination: Any, source: Any) -> tuple[bool, Any, int]:
-    if tele2_client is None:
-        return False, {"message": "HTTP client not ready"}, 503
-
-    clean_destination = normalize_phone(destination)
-    clean_source = str(source or "").strip()
-    if not clean_destination:
-        return False, {"message": "Некорректный номер назначения"}, 400
-    if not clean_source:
-        return False, {"message": "Не указан внутренний номер source"}, 400
-
-    url = f"{TELE2_API_URL}/call/outgoing"
-    params = {
-        "destination": clean_destination,
-        "source": clean_source,
-    }
-
-    try:
-        response = await tele2_client.post(
-            url,
-            headers=get_t2_headers(TELE2_ACCESS_TOKEN),
-            params=params,
-        )
-        if response.status_code in (401, 403) and await refresh_tele2_token():
-            response = await tele2_client.post(
-                url,
-                headers=get_t2_headers(TELE2_ACCESS_TOKEN),
-                params=params,
-            )
-
-        result = safe_json(response)
-        if response.status_code in (200, 201, 202):
-            logger.info("📞 Исходящий вызов %s -> %s", clean_source, clean_destination)
-            return True, result, response.status_code
-
-        logger.error("T2 outgoing error %s %s", response.status_code, response.text[:300])
-        return False, result, response.status_code
-    except Exception as exc:
-        logger.exception("Ошибка исходящего вызова T2")
-        return False, {"message": str(exc)}, 500
-
-
-# ============================================================
-# MOYSKLAD PHONE API CLIENT
-# ============================================================
-
-async def moysklad_create_call(
-    *,
-    external_id: str,
-    number: Any,
-    extension: Any,
-    is_incoming: bool,
-    start_time: str | None = None,
-    end_time: str | None = None,
-    duration: int | None = None,
-    event_type: str | None = "SHOW",
-) -> tuple[bool, Any]:
-    if moysklad_client is None:
-        return False, {"message": "MoySklad HTTP client not ready"}
-    if not MOYSKLAD_PHONE_API_KEY:
-        return False, {"message": "MOYSKLAD_PHONE_API_KEY is not configured"}
-
-    clean_number = phone_for_moysklad(number)
-    if not clean_number:
-        return False, {"message": "Не удалось определить номер телефона"}
-
-    extension_value = str(extension or "").strip()
-    body: dict[str, Any] = {
-        "externalId": str(external_id),
-        "number": clean_number,
-        "isIncoming": bool(is_incoming),
-        "startTime": start_time or now_moysklad(),
-    }
-    if extension_value:
-        body["extension"] = extension_value
-    if end_time:
-        body["endTime"] = end_time
-    if duration is not None:
-        body["duration"] = duration
-    if event_type and extension_value:
-        body["events"] = [{
-            "eventType": event_type,
-            "extension": extension_value,
-            "sequence": 1,
-        }]
-
-    url = f"{MOYSKLAD_PHONE_API_URL}/call"
-    try:
-        response = await moysklad_client.post(
-            url,
-            headers=get_moysklad_phone_headers(),
-            json=body,
-        )
-        result = safe_json(response)
-        if response.is_success:
-            logger.info("☎️ МойСклад: создан звонок externalId=%s", external_id)
-            remember_call(str(external_id))
-            return True, result
-
-        logger.error("MoySklad Phone API create error %s %s", response.status_code, response.text[:500])
-        return False, {"status_code": response.status_code, "detail": result}
-    except Exception as exc:
-        logger.exception("Ошибка создания звонка в МойСклад Phone API")
-        return False, {"message": str(exc)}
-
-
-async def moysklad_update_call(
-    *,
-    external_id: str,
-    end_time: str | None = None,
-    duration: int | None = None,
-    event_type: str | None = "HIDE",
-    extension: Any = None,
-    record_url: list[str] | None = None,
-) -> tuple[bool, Any]:
-    if moysklad_client is None:
-        return False, {"message": "MoySklad HTTP client not ready"}
-    if not MOYSKLAD_PHONE_API_KEY:
-        return False, {"message": "MOYSKLAD_PHONE_API_KEY is not configured"}
-
-    body: dict[str, Any] = {}
-    if end_time:
-        body["endTime"] = end_time
-    if duration is not None:
-        body["duration"] = duration
-    if record_url:
-        body["recordUrl"] = record_url
-
-    extension_value = str(extension or "").strip()
-    if event_type and (extension_value or event_type in ("HIDE_ALL",)):
-        event: dict[str, Any] = {
-            "eventType": event_type,
-            "sequence": int(time.time() * 1000),
-        }
-        if extension_value:
-            event["extension"] = extension_value
-        body["events"] = [event]
-
-    if not body:
-        return True, {"status": "nothing_to_update"}
-
-    url = f"{MOYSKLAD_PHONE_API_URL}/call/extid/{external_id}"
-    try:
-        response = await moysklad_client.put(
-            url,
-            headers=get_moysklad_phone_headers(),
-            json=body,
-        )
-        result = safe_json(response)
-        if response.is_success:
-            logger.info("☎️ МойСклад: обновлён звонок externalId=%s", external_id)
-            return True, result
-
-        logger.error("MoySklad Phone API update error %s %s", response.status_code, response.text[:500])
-        return False, {"status_code": response.status_code, "detail": result}
-    except Exception as exc:
-        logger.exception("Ошибка обновления звонка в МойСклад Phone API")
-        return False, {"message": str(exc)}
-
-
-# ============================================================
-# TELE2 WEBHOOK -> MOYSKLAD PHONE API
-# ============================================================
-
-async def process_tele2_event(data: dict[str, Any]) -> None:
-    call = data.get("call") if isinstance(data.get("call"), dict) else {}
-
-    external_id = extract_first(
-        data,
-        ("callId",), ("call_id",), ("id",),
-        ("event", "callId"), ("event", "id"),
-        ("call", "callId"), ("call", "id"),
-    )
-    if external_id is None:
-        external_id = f"tele2-{int(time.time() * 1000)}"
-    external_id = str(external_id)
-
-    caller = extract_first(
-        data,
-        ("caller",), ("from",), ("phone",), ("number",),
-        ("event", "caller"), ("event", "from"),
-        ("call", "caller"), ("call", "from"), ("call", "number"),
-    )
-    callee = extract_first(
-        data,
-        ("callee",), ("to",), ("destination",),
-        ("event", "callee"), ("event", "to"),
-        ("call", "callee"), ("call", "to"),
-    )
-    extension = extract_first(
-        data,
-        ("extension",), ("user",), ("source",),
-        ("event", "extension"), ("call", "extension"),
-    )
-    event_name = str(extract_first(data, ("eventType",), ("event", "type"), ("type",)) or "").upper()
-    is_incoming = bool(extract_first(data, ("isIncoming",), ("incoming",)))
-    if not event_name:
-        is_incoming = True
-
-    # Если направление не передано явно, для webhook входящего звонка считаем входящим.
-    phone = caller or callee
-    if not phone:
-        logger.warning("Tele2 webhook без номера: %s", data)
-        return
-
-    if event_name in {"CALL_END", "END", "HANGUP", "COMPLETED", "CALL_FINISH"}:
-        duration = extract_first(data, ("duration",), ("call", "duration"))
-        try:
-            duration_value = int(duration) if duration is not None else None
-        except (TypeError, ValueError):
-            duration_value = None
-        await moysklad_update_call(
-            external_id=external_id,
-            end_time=now_moysklad(),
-            duration=duration_value,
-            event_type="HIDE",
-            extension=extension,
-        )
-        return
-
-    if event_name in {"CALL_ANSWER", "ANSWER", "CONNECTED"}:
-        await moysklad_update_call(
-            external_id=external_id,
-            event_type="STARTTIME",
-            extension=extension,
-        )
-        return
-
-    # Начало входящего вызова: SHOW отображает карточку звонка в МойСклад.
-    await moysklad_create_call(
-        external_id=external_id,
-        number=phone,
-        extension=extension,
-        is_incoming=is_incoming,
-        start_time=now_moysklad(),
-        event_type="SHOW",
-    )
-
-
-@app.post("/api/tele2/webhook")
-async def tele2_webhook(request: Request, background_tasks: BackgroundTasks):
-    try:
-        data = await request.json()
-        if not isinstance(data, dict):
-            return JSONResponse(status_code=400, content={"status": "error", "message": "Ожидался JSON-объект"})
-        logger.info("📥 Tele2 webhook: %s", data)
-        background_tasks.add_task(process_tele2_event, data)
-        return {"status": "ok"}
-    except Exception as exc:
-        logger.exception("Ошибка Tele2 webhook")
-        return JSONResponse(status_code=400, content={"status": "error", "detail": str(exc)})
-
-
-# ============================================================
-# MOYSKLAD PHONE API PROVIDER -> TELE2 OUTGOING CALL
-# ============================================================
-
-@app.post("/api/moysklad/phone")
-async def moysklad_phone_provider(
-    request: Request,
-    lognex_content_md5: str | None = Header(default=None, alias="Lognex-Content-MD5"),
-):
-    try:
-        payload = await request.json()
-        if not isinstance(payload, dict):
-            return JSONResponse(
-                status_code=400,
-                content={"status": "error", "message": "Ожидался JSON-объект"},
-            )
-
-        if not validate_moysklad_signature(payload, lognex_content_md5):
-            logger.warning("Неверная подпись запроса МойСклад Phone API")
-            return JSONResponse(
-                status_code=401,
-                content={"status": "error", "message": "Invalid signature"},
-            )
-
-        src_number = (
-            payload.get("srcNumber")
-            or payload.get("source")
-            or payload.get("extension")
-        )
-        dest_number = (
-            payload.get("destNumber")
-            or payload.get("destination")
-            or payload.get("phone")
-        )
-        uid = payload.get("uid") or src_number
-
-        t2_source_number = str(src_number or "").strip()
-        if not t2_source_number:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "status": "error",
-                    "uid": uid,
-                    "detail": "Не указан номер сотрудника srcNumber",
-                },
-            )
-
-        if not dest_number:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "status": "error",
-                    "uid": uid,
-                    "detail": "Не указан номер клиента destNumber",
-                },
-            )
-
-        logger.info(
-            "📞 T2 outgoing: source=%s destination=%s",
-            t2_source_number,
-            dest_number,
-        )
-
-        ok, result, status_code = await call_tele2_outgoing(
-            dest_number,
-            t2_source_number,
-        )
-
-        if ok:
-            return {
-                "status": "ok",
-                "uid": uid,
-                "data": result,
-            }
-
-        return JSONResponse(
-            status_code=(
-                502
-                if status_code >= 500 or status_code in (401, 403)
-                else status_code
-            ),
-            content={
-                "status": "error",
-                "uid": uid,
-                "detail": result,
-            },
-        )
-    except Exception as exc:
-        logger.exception("Ошибка provider endpoint МойСклад")
-        return JSONResponse(
-            status_code=400,
-            content={"status": "error", "detail": str(exc)},
-        )
-
-
-# ============================================================
-# MANUAL OUTGOING CALL ENDPOINT (OPTIONAL)
-# ============================================================
-
-@app.post("/api/make-call")
-async def make_outgoing_call(
-    payload: dict[str, Any],
-    x_api_key: str | None = Header(default=None),
-):
-    if CALL_API_KEY and x_api_key != CALL_API_KEY:
-        return JSONResponse(
-            status_code=401,
-            content={"status": "error", "message": "Unauthorized"},
-        )
-
-    phone = payload.get("phone") or payload.get("destination")
-    source = payload.get("source") or payload.get("user")
-    t2_source_number = str(source or "").strip()
-
-    if not t2_source_number:
-        return JSONResponse(
-            status_code=400,
-            content={"status": "error", "detail": "Не указан source"},
-        )
-
-    if not phone:
-        return JSONResponse(
-            status_code=400,
-            content={"status": "error", "detail": "Не указан destination"},
-        )
-
-    ok, result, status_code = await call_tele2_outgoing(
-        phone,
-        t2_source_number,
-    )
-
-    if ok:
-        return {"status": "success", "data": result}
-
-    return JSONResponse(
-        status_code=status_code if status_code < 500 else 502,
-        content={"status": "error", "detail": result},
-    )
-
-
-# ============================================================
-# DIAGNOSTICS
-# ============================================================
-
-@app.get("/api/test-tele2")
-async def test_tele2():
-    if tele2_client is None:
-        return JSONResponse(status_code=503, content={"status": "error", "message": "HTTP client not ready"})
-
-    url = f"{TELE2_API_URL}/monitoring/calls"
-    try:
-        response = await tele2_client.get(url, headers=get_t2_headers(TELE2_ACCESS_TOKEN))
-        if response.status_code == 401 and await refresh_tele2_token():
-            response = await tele2_client.get(url, headers=get_t2_headers(TELE2_ACCESS_TOKEN))
-        return {
-            "status": "ok" if response.is_success else "error",
-            "status_code": response.status_code,
-            "body": safe_json(response),
-        }
-    except Exception as exc:
-        logger.exception("Ошибка test-tele2")
-        return JSONResponse(status_code=502, content={"status": "error", "detail": str(exc)})
-
-
-@app.get("/api/test-moysklad-phone")
-async def test_moysklad_phone():
-    if moysklad_client is None:
-        return JSONResponse(status_code=503, content={"status": "error", "message": "HTTP client not ready"})
-    if not MOYSKLAD_PHONE_API_KEY:
-        return JSONResponse(status_code=500, content={"status": "error", "message": "MOYSKLAD_PHONE_API_KEY is not configured"})
-
-    url = f"{MOYSKLAD_PHONE_API_URL}/employee"
-    try:
-        response = await moysklad_client.get(
-            url,
-            headers=get_moysklad_phone_headers(),
-            params={"filter": "extention~=0"},
-        )
-        return {
-            "status": "ok" if response.is_success else "error",
-            "status_code": response.status_code,
-            "body": safe_json(response),
-        }
-    except Exception as exc:
-        logger.exception("Ошибка test-moysklad-phone")
-        return JSONResponse(status_code=502, content={"status": "error", "detail": str(exc)})
-
-
-@app.get("/api/config")
-async def config_status():
-    return {
-        "status": "ok",
-        "tele2_api_url": TELE2_API_URL,
-        "moysklad_phone_api_url": MOYSKLAD_PHONE_API_URL,
-        "provider_url": PROVIDER_URL,
-        "tele2_access_token_configured": bool(TELE2_ACCESS_TOKEN),
-        "tele2_refresh_token_configured": bool(TELE2_REFRESH_TOKEN),
-        "moysklad_phone_api_key_configured": bool(MOYSKLAD_PHONE_API_KEY),
-        "call_api_key_configured": bool(CALL_API_KEY),
-    }
-
-
-@app.get("/")
-@app.head("/")
-async def root():
-    return {
-        "status": "running",
-        "service": "Tele2-MoySklad-PhoneAPI",
-        "mode": "phone-api",
-        "provider_url": PROVIDER_URL,
-    }
-
-
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
+    return {"ok": True, "live_calls": len(live), "employees": len(emp_full)}
+
+
+# ---------------------------------------------------------------- МойСклад -> T2: «Позвонить»
+def signature_ok(raw: bytes, body: dict, header: str | None) -> bool:
+    """MD5 от (ключ + значения параметров). Точный порядок в доке не уточнён - пробуем два варианта."""
+    if not header:
+        return False
+    got = header.strip().upper()
+    variants = [MS_KEY + "".join(str(v) for v in body.values()), MS_KEY + raw.decode("utf-8", "ignore")]
+    return any(hashlib.md5(v.encode()).hexdigest().upper() == got for v in variants)
+
+
+@app.post("/moysklad/callRequest")
+async def call_request(request: Request):
+    raw = await request.body()
+    try:
+        body = json.loads(raw)
+        src, dst = str(body["srcNumber"]), norm(body["destNumber"])
+    except Exception:
+        raise HTTPException(400, "bad body")
+    if not signature_ok(raw, body, request.headers.get("Lognex-Content-MD5")):
+        log.warning("подпись Lognex-Content-MD5 не совпала (header=%s, поля=%s)",
+                    request.headers.get("Lognex-Content-MD5"), list(body))
+        if SIGNATURE_MODE == "enforce":
+            raise HTTPException(403, "bad signature")
+    source = emp_full.get(src, src) if CLICK_SOURCE == "full" else src
+    try:
+        await t2("POST", "/call/outgoing", params={"source": source, "destination": dst})
+    except httpx.HTTPStatusError as e:
+        log.error("T2 click2call: %s %s", e.response.status_code, e.response.text[:300])
+        raise HTTPException(502, "T2 error")
+    log.info("click2call: %s -> %s", source, dst)
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------- прокси записей
+async def open_record(name: str) -> httpx.Response:
+    for attempt in (1, 2):
+        token = tokens.access
+        req = http.build_request("GET", f"{T2_BASE}/call-records/file/{quote(name, safe='')}",
+                                 headers={"Authorization": token})
+        r = await http.send(req, stream=True)
+        if r.status_code in (401, 403) and attempt == 1:
+            await r.aclose()
+            await tokens.refresh_now(stale=token)
+            continue
+        return r
+    raise RuntimeError("unreachable")
+
+
+@app.get("/record/{name}")
+async def record(name: str, sig: str):
+    if not hmac.compare_digest(sig, sign(name)):
+        raise HTTPException(403)
+    r = await open_record(name)
+    if r.status_code != 200:
+        await r.aclose()
+        raise HTTPException(404 if r.status_code == 404 else 502)
+    return StreamingResponse(r.aiter_bytes(),
+                             media_type=r.headers.get("content-type", "audio/mpeg"),
+                             background=BackgroundTask(r.aclose))
