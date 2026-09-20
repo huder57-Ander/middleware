@@ -31,6 +31,7 @@ from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("bridge")
 
 # ---------------------------------------------------------------- настройки
