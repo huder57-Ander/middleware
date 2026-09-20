@@ -1,4 +1,0 @@
- .env
-   __pycache__/
-   t2_tokens.json
-   processed_records.json
