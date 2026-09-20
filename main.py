@@ -10,7 +10,6 @@
 Запускать в ОДНОМ процессе (опрос живёт внутри приложения):
   uvicorn main:app --host 0.0.0.0 --port $PORT
 """
-
 import asyncio
 import hashlib
 import hmac
@@ -35,7 +34,7 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("bridge")
 
 # ---------------------------------------------------------------- настройки
-T2_BASE = os.getenv("T2_BASE", "https://ats2.tele2.ru/crm/openapi")
+T2_BASE = os.getenv("T2_BASE", "https://ats2.t2.ru/crm/openapi")  # ats2.tele2.ru отдаёт 308 на t2.ru
 MS_BASE = "https://api.moysklad.ru/api/phone/1.0"
 MS_KEY = os.environ["MS_PHONE_KEY"]  # ключ из приложения Phone API в МоёмСкладе
 PUBLIC_URL = os.getenv("PUBLIC_URL", "https://middleware-hudia.onrender.com").rstrip("/")
@@ -49,7 +48,9 @@ TZ = ZoneInfo(os.getenv("TZ_NAME", "Europe/Moscow"))
 CLICK_SOURCE = os.getenv("CLICK_SOURCE_MODE", "full")  # full | short: что слать в T2 как source
 SIGNATURE_MODE = os.getenv("SIGNATURE_MODE", "enforce")  # enforce | log (только для отладки)
 
-http = httpx.AsyncClient(timeout=15)
+# T2 (WAF) может отклонять запросы с «библиотечным» User-Agent/Accept -> 406, поэтому задаём явно
+UA = os.getenv("HTTP_USER_AGENT", "Mozilla/5.0 (compatible; crm-bridge/1.0)")
+http = httpx.AsyncClient(timeout=15, headers={"User-Agent": UA})
 MS_HEADERS = {"Lognex-Phone-Auth-Token": MS_KEY, "Accept": "application/json;charset=utf-8"}
 
 
@@ -124,10 +125,14 @@ tokens = Tokens()
 async def t2(method: str, path: str, **kw) -> httpx.Response:
     for attempt in (1, 2):
         token = tokens.access
-        r = await http.request(method, T2_BASE + path, headers={"Authorization": token}, **kw)
+        r = await http.request(method, T2_BASE + path,
+                               headers={"Authorization": token, "Accept": "application/json"}, **kw)
         if r.status_code in (401, 403) and attempt == 1:
             await tokens.refresh_now(stale=token)
             continue
+        if r.status_code >= 400:
+            log.error("T2 %s %s -> %s, ответ: %s | заголовки: %s", method, path,
+                      r.status_code, r.text[:300], dict(r.headers))
         r.raise_for_status()
         return r
     raise RuntimeError("unreachable")
@@ -417,7 +422,7 @@ async def open_record(name: str) -> httpx.Response:
     for attempt in (1, 2):
         token = tokens.access
         req = http.build_request("GET", f"{T2_BASE}/call-records/file/{quote(name, safe='')}",
-                                 headers={"Authorization": token})
+                                 headers={"Authorization": token, "Accept": "*/*"})
         r = await http.send(req, stream=True)
         if r.status_code in (401, 403) and attempt == 1:
             await r.aclose()
