@@ -587,21 +587,28 @@ async def moysklad_phone_provider(
         dest_number = payload.get("destNumber") or payload.get("destination") or payload.get("phone")
         uid = payload.get("uid") or src_number
 
-        t2_source_number = await get_t2_employee_full_number(src_number)
-        if not t2_source_number:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "status": "error",
-                    "uid": uid,
-                    "detail": f"T2 employee not found: {src_number}",
-                },
-            )
+       t2_source_number = str(src_number or "").strip()
 
-        ok, result, status_code = await call_tele2_outgoing(
-            dest_number,
-            t2_source_number,
-        )
+if not t2_source_number:
+    return JSONResponse(
+        status_code=400,
+        content={
+            "status": "error",
+            "uid": uid,
+            "detail": "Не указан номер сотрудника srcNumber",
+        },
+    )
+
+logger.info(
+    "📞 T2 outgoing: source=%s destination=%s",
+    t2_source_number,
+    dest_number,
+)
+
+ok, result, status_code = await call_tele2_outgoing(
+    dest_number,
+    t2_source_number,
+)
         if ok:
             # Для провайдера МойСклад достаточно успешного HTTP-ответа.
             return {"status": "ok", "uid": uid, "data": result}
