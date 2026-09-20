@@ -176,13 +176,14 @@ async def lifespan(app: FastAPI):
 
     logger.info("🚀 Запуск Tele2 -> МойСклад Phone API Middleware")
     tele2_client = httpx.AsyncClient(
-    headers={
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    },
-    timeout=10.0,
-)
+        http2=False,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+        timeout=10.0,
+    )
     moysklad_client = httpx.AsyncClient(
         timeout=httpx.Timeout(connect=20.0, read=30.0, write=30.0, pool=30.0),
     )
@@ -232,85 +233,6 @@ async def refresh_tele2_token() -> bool:
         logger.exception("Ошибка обновления T2 token")
     return False
 
-
-async def get_t2_employee_full_number(short_number: str) -> str | None:
-    """Находит fullNumber сотрудника T2 по его shortNumber."""
-    if tele2_client is None:
-        logger.error("T2 client is not initialized")
-        return None
-
-    short_number = str(short_number or "").strip()
-    if not short_number:
-        logger.error("Пустой короткий номер сотрудника T2")
-        return None
-
-    url = f"{TELE2_API_URL}/employees"
-
-    # Формируем гарантированно правильные заголовки
-    headers = get_t2_headers(TELE2_ACCESS_TOKEN)
-
-    try:
-        # Важно: передаем заголовки явным образом
-        response = await tele2_client.get(url, headers=headers)
-
-        # Если токен истек, обновляем его и повторяем запрос с ОБНОВЛЕННЫМИ заголовками
-        if response.status_code in (401, 403) and await refresh_tele2_token():
-            headers = get_t2_headers(TELE2_ACCESS_TOKEN)
-            response = await tele2_client.get(url, headers=headers)
-
-        if not response.is_success:
-            logger.error(
-                "Ошибка API Tele2 (%s): %s",
-                response.status_code,
-                response.text[:500],
-            )
-            return None
-
-        employees = safe_json(response)
-
-        # Обработка оберток ответа (data, content, employees)
-        if isinstance(employees, dict):
-            employees = (
-                employees.get("employees")
-                or employees.get("content")
-                or employees.get("data")
-                or []
-            )
-
-        if not isinstance(employees, list):
-            logger.error(
-                "Неожиданный формат ответа T2 /employees: %s",
-                type(employees).__name__,
-            )
-            return None
-
-        # Сопоставление короткого номера с полным
-        for employee in employees:
-            if not isinstance(employee, dict):
-                continue
-
-            employee_short = str(employee.get("shortNumber") or "").strip()
-
-            if employee_short == short_number:
-                full_number = employee.get("fullNumber")
-
-                if full_number:
-                    logger.info(
-                        "T2 employee mapped: %s -> ***%s",
-                        short_number,
-                        str(full_number)[-4:],
-                    )
-                    return str(full_number).strip()
-
-        logger.warning(
-            "T2 employee not found by short number: %s",
-            short_number,
-        )
-        return None
-
-    except Exception:
-        logger.exception("Ошибка поиска сотрудника T2: %s", short_number)
-        return None
 
 async def call_tele2_outgoing(destination: Any, source: Any) -> tuple[bool, Any, int]:
     if tele2_client is None:
@@ -577,49 +499,87 @@ async def moysklad_phone_provider(
     try:
         payload = await request.json()
         if not isinstance(payload, dict):
-            return JSONResponse(status_code=400, content={"status": "error", "message": "Ожидался JSON-объект"})
+            return JSONResponse(
+                status_code=400,
+                content={"status": "error", "message": "Ожидался JSON-объект"},
+            )
 
         if not validate_moysklad_signature(payload, lognex_content_md5):
             logger.warning("Неверная подпись запроса МойСклад Phone API")
-            return JSONResponse(status_code=401, content={"status": "error", "message": "Invalid signature"})
+            return JSONResponse(
+                status_code=401,
+                content={"status": "error", "message": "Invalid signature"},
+            )
 
-        src_number = payload.get("srcNumber") or payload.get("source") or payload.get("extension")
-        dest_number = payload.get("destNumber") or payload.get("destination") or payload.get("phone")
+        src_number = (
+            payload.get("srcNumber")
+            or payload.get("source")
+            or payload.get("extension")
+        )
+        dest_number = (
+            payload.get("destNumber")
+            or payload.get("destination")
+            or payload.get("phone")
+        )
         uid = payload.get("uid") or src_number
 
-       t2_source_number = str(src_number or "").strip()
+        t2_source_number = str(src_number or "").strip()
+        if not t2_source_number:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "error",
+                    "uid": uid,
+                    "detail": "Не указан номер сотрудника srcNumber",
+                },
+            )
 
-if not t2_source_number:
-    return JSONResponse(
-        status_code=400,
-        content={
-            "status": "error",
-            "uid": uid,
-            "detail": "Не указан номер сотрудника srcNumber",
-        },
-    )
+        if not dest_number:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "error",
+                    "uid": uid,
+                    "detail": "Не указан номер клиента destNumber",
+                },
+            )
 
-logger.info(
-    "📞 T2 outgoing: source=%s destination=%s",
-    t2_source_number,
-    dest_number,
-)
+        logger.info(
+            "📞 T2 outgoing: source=%s destination=%s",
+            t2_source_number,
+            dest_number,
+        )
 
-ok, result, status_code = await call_tele2_outgoing(
-    dest_number,
-    t2_source_number,
-)
+        ok, result, status_code = await call_tele2_outgoing(
+            dest_number,
+            t2_source_number,
+        )
+
         if ok:
-            # Для провайдера МойСклад достаточно успешного HTTP-ответа.
-            return {"status": "ok", "uid": uid, "data": result}
+            return {
+                "status": "ok",
+                "uid": uid,
+                "data": result,
+            }
 
         return JSONResponse(
-            status_code=502 if status_code >= 500 or status_code in (401, 403) else status_code,
-            content={"status": "error", "uid": uid, "detail": result},
+            status_code=(
+                502
+                if status_code >= 500 or status_code in (401, 403)
+                else status_code
+            ),
+            content={
+                "status": "error",
+                "uid": uid,
+                "detail": result,
+            },
         )
     except Exception as exc:
         logger.exception("Ошибка provider endpoint МойСклад")
-        return JSONResponse(status_code=400, content={"status": "error", "detail": str(exc)})
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "detail": str(exc)},
+        )
 
 
 # ============================================================
@@ -627,29 +587,44 @@ ok, result, status_code = await call_tele2_outgoing(
 # ============================================================
 
 @app.post("/api/make-call")
-async def make_outgoing_call(payload: dict[str, Any], x_api_key: str | None = Header(default=None)):
+async def make_outgoing_call(
+    payload: dict[str, Any],
+    x_api_key: str | None = Header(default=None),
+):
     if CALL_API_KEY and x_api_key != CALL_API_KEY:
-        return JSONResponse(status_code=401, content={"status": "error", "message": "Unauthorized"})
+        return JSONResponse(
+            status_code=401,
+            content={"status": "error", "message": "Unauthorized"},
+        )
 
     phone = payload.get("phone") or payload.get("destination")
     source = payload.get("source") or payload.get("user")
-    t2_source_number = await get_t2_employee_full_number(source)
+    t2_source_number = str(source or "").strip()
+
     if not t2_source_number:
         return JSONResponse(
-            status_code=404,
-            content={
-                "status": "error",
-                "detail": f"T2 employee not found: {source}",
-            },
+            status_code=400,
+            content={"status": "error", "detail": "Не указан source"},
+        )
+
+    if not phone:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "detail": "Не указан destination"},
         )
 
     ok, result, status_code = await call_tele2_outgoing(
         phone,
         t2_source_number,
     )
+
     if ok:
         return {"status": "success", "data": result}
-    return JSONResponse(status_code=status_code if status_code < 500 else 502, content={"status": "error", "detail": result})
+
+    return JSONResponse(
+        status_code=status_code if status_code < 500 else 502,
+        content={"status": "error", "detail": result},
+    )
 
 
 # ============================================================
