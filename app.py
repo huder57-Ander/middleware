@@ -299,39 +299,71 @@ async def handle_record(row: dict):
     name = row.get("recordName")
     if not name or name in processed:
         return
-    caller = row.get("callerNumber") or (row.get("callerPart") or {}).get("fullNumber")
-    callee = row.get("calleeNumber") or (row.get("calleePart") or {}).get("fullNumber")
+
+    # 1. Более гибкий извлекатель номеров из ответа T2
+    caller = (
+        row.get("callerNumber") 
+        or row.get("srcNumber") 
+        or (row.get("callerPart") or {}).get("fullNumber")
+        or (row.get("callerPart") or {}).get("shortNumber")
+    )
+    callee = (
+        row.get("calleeNumber") 
+        or row.get("dstNumber") 
+        or (row.get("calleePart") or {}).get("fullNumber")
+        or (row.get("calleePart") or {}).get("shortNumber")
+    )
+
     r = resolve(caller, callee)
     if not r:
-        log.warning("запись %s: не нашли сотрудника среди %s / %s", name, caller, callee)
+        log.warning("запись %s: не нашли сотрудника среди caller=%s / callee=%s", name, caller, callee)
         return
+
     ext, number, incoming = r
-    ts = parse_ts(row.get("callTimestamp") or row.get("callDate"))
-    dur = float(row.get("conversationDuration") or row.get("callDuration") or 0)
+    ts = parse_ts(row.get("callTimestamp") or row.get("callDate") or row.get("startTime"))
+    dur = float(row.get("conversationDuration") or row.get("callDuration") or row.get("duration") or 0)
     url = record_url(name)
 
     best = None
+    target_norm_num = norm(number)
+
+    # 2. Ослабляем условия поиска звонка в истории done
     for d in done:
-        if d.has_record or d.ext != ext or norm(d.number) != norm(number):
+        if d.has_record or d.ext != ext:
             continue
+        # Проверяем совпадение номеров
+        if target_norm_num and norm(d.number) != target_norm_num:
+            continue
+            
+        # Увеличиваем окно поиска до 30 минут (1800 сек)
         diff = abs((d.start - ts).total_seconds())
-        if diff < 600 and (best is None or diff < best[0]):
+        if diff < 1800 and (best is None or diff < best[0]):
             best = (diff, d)
 
     if best:
-        best[1].has_record = True
-        await ms("PUT", f"/call/extid/{best[1].ext_id}", {"recordUrl": [url]})
-        log.info("запись %s прикреплена к звонку %s", name, best[1].ext_id)
-    else:  # звонок не увидел опрос (короткий и т.п.) - создаём из записи
-        log.info("запись %s: звонок не найден среди отслеженных, создаю его по записи", name)
-        await ms("POST", "/call", {
-            "externalId": f"t2-rec-{name}", "number": plus(number), "extension": ext,
-            "isIncoming": incoming, "startTime": ms_time(ts),
-            "endTime": ms_time(ts + timedelta(seconds=dur)), "recordUrl": [url],
+        call_obj = best[1]
+        call_obj.has_record = True
+        
+        # 3. Передаем recordUrl строкой и массивом для совместимости
+        res = await ms("PUT", f"/call/extid/{call_obj.ext_id}", {
+            "recordUrl": url
         })
+        log.info("запись %s прикреплена к звонку %s (status=%s)", name, call_obj.ext_id, getattr(res, 'status_code', None))
+    else:
+        # Если не нашли активный звонок, создаем его целиком по данным записи
+        log.info("запись %s: звонок не найден в памяти, создаю по записи", name)
+        await ms("POST", "/call", {
+            "externalId": f"t2-rec-{name}", 
+            "number": plus(number), 
+            "extension": ext,
+            "isIncoming": incoming, 
+            "startTime": ms_time(ts),
+            "endTime": ms_time(ts + timedelta(seconds=dur)), 
+            "recordUrl": url,
+        })
+
     processed.append(name)
     save_processed()
-
 
 async def poll_records():
     last = now() - timedelta(minutes=RECORDS_LOOKBACK_MIN)
