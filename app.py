@@ -38,7 +38,7 @@ log = logging.getLogger("bridge")
 T2_BASE = os.getenv("T2_BASE", "https://ats2.t2.ru/crm/openapi")  # ats2.tele2.ru отдаёт 308 на t2.ru
 MS_BASE = "https://api.moysklad.ru/api/phone/1.0"
 MS_KEY = os.environ["MS_PHONE_KEY"]  # ключ из приложения Phone API в МоёмСкладе
-PUBLIC_URL = os.getenv("PUBLIC_URL", "https://middleware-hudia.onrender.com").rstrip("/")
+PUBLIC_URL = os.getenv("PUBLIC_URL", "https://moysklad-t2-andreihuder.amvera.io").rstrip("/")
 RECORD_SECRET = os.getenv("RECORD_SECRET", MS_KEY)  # для подписи ссылок на записи
 TOKEN_FILE = Path(os.getenv("TOKEN_STORE_PATH", "t2_tokens.json"))
 PROCESSED_FILE = TOKEN_FILE.with_name("processed_records.json")
@@ -321,7 +321,9 @@ async def handle_record(row: dict):
     if best:
         best[1].has_record = True
         await ms("PUT", f"/call/extid/{best[1].ext_id}", {"recordUrl": [url]})
+        log.info("запись %s прикреплена к звонку %s", name, best[1].ext_id)
     else:  # звонок не увидел опрос (короткий и т.п.) - создаём из записи
+        log.info("запись %s: звонок не найден среди отслеженных, создаю его по записи", name)
         await ms("POST", "/call", {
             "externalId": f"t2-rec-{name}", "number": plus(number), "extension": ext,
             "isIncoming": incoming, "startTime": ms_time(ts),
@@ -371,6 +373,10 @@ async def employees_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    log.info("ссылки на записи будут вести на %s/record/<имя записи>?sig=...", PUBLIC_URL)
+    if RECORD_SECRET == MS_KEY:
+        log.warning("RECORD_SECRET не задан: ссылки на записи подписаны ключом Phone API "
+                    "и перестанут открываться при его смене")
     tasks = [asyncio.create_task(f()) for f in (token_loop, employees_loop, poll_calls, poll_records)]
     yield
     for t in tasks:
