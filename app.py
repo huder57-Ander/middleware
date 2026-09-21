@@ -31,6 +31,7 @@ from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("bridge")
 
 # ---------------------------------------------------------------- настройки
@@ -122,7 +123,8 @@ class Tokens:
 tokens = Tokens()
 
 
-async def t2(method: str, path: str, **kw) -> httpx.Response:
+async def t2(method: str, path: str, expect: tuple = (), **kw) -> httpx.Response:
+    """expect - коды ответа, которые вызывающий код обрабатывает сам (в лог как ошибка не пишем)."""
     for attempt in (1, 2):
         token = tokens.access
         r = await http.request(method, T2_BASE + path,
@@ -130,7 +132,7 @@ async def t2(method: str, path: str, **kw) -> httpx.Response:
         if r.status_code in (401, 403) and attempt == 1:
             await tokens.refresh_now(stale=token)
             continue
-        if r.status_code >= 400:
+        if r.status_code >= 400 and r.status_code not in expect:
             log.error("T2 %s %s -> %s, ответ: %s | заголовки: %s", method, path,
                       r.status_code, r.text[:300], dict(r.headers))
         r.raise_for_status()
@@ -413,7 +415,8 @@ async def call_request(request: Request):
     candidates = [c for i, c in enumerate(order) if c and c not in order[:i]]
     for source in candidates:
         try:
-            await t2("POST", "/call/outgoing", params={"source": source, "destination": dst})
+            await t2("POST", "/call/outgoing", expect=(404,),
+                     params={"source": source, "destination": dst})
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:  # сотрудник не найден - пробуем другой формат
                 log.warning("click2call: source=%r не подошёл, пробуем следующий формат", source)
