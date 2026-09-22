@@ -296,7 +296,12 @@ def parse_ts(v) -> datetime:
 
 
 async def handle_record(row: dict):
-    name = row.get("recordName")
+    # ВАЖНО: у T2 поле называется "recordFileName", а не "recordName"
+    # (см. документацию GET /call-records/info). Из-за неверного имени
+    # поля эта функция раньше выходила на первой строке для КАЖДОЙ
+    # записи, ещё до любого логирования, и recordUrl никогда не
+    # долетал до МоегоСклада.
+    name = row.get("recordFileName") or row.get("recordName")
     if not name or name in processed:
         return
 
@@ -343,23 +348,26 @@ async def handle_record(row: dict):
     if best:
         call_obj = best[1]
         call_obj.has_record = True
-        
-        # 3. Передаем recordUrl строкой и массивом для совместимости
+
+        # МойСклад ждёт recordUrl как МАССИВ строк, а не строку
+        # (см. доку Phone API 1.0: "recordUrl": ["http://..."])
         res = await ms("PUT", f"/call/extid/{call_obj.ext_id}", {
-            "recordUrl": [url],  
+            "recordUrl": [url],
         })
         log.info("запись %s прикреплена к звонку %s (status=%s)", name, call_obj.ext_id, getattr(res, 'status_code', None))
     else:
+        # Если не нашли активный звонок, создаем его целиком по данным записи
         log.info("запись %s: звонок не найден в памяти, создаю по записи", name)
         await ms("POST", "/call", {
-            "externalId": f"t2-rec-{name}",
-            "number": plus(number),
+            "externalId": f"t2-rec-{name}", 
+            "number": plus(number), 
             "extension": ext,
-            "isIncoming": incoming,
+            "isIncoming": incoming, 
             "startTime": ms_time(ts),
-            "endTime": ms_time(ts + timedelta(seconds=dur)),
-            "recordUrl": [url],   # было: "recordUrl": url
+            "endTime": ms_time(ts + timedelta(seconds=dur)), 
+            "recordUrl": [url],  # тоже массив
         })
+
     processed.append(name)
     save_processed()
 
@@ -373,6 +381,9 @@ async def poll_records():
                 "start": (last - timedelta(minutes=2)).isoformat(timespec="seconds"),
                 "end": end.isoformat(timespec="seconds"),
             })).json() or []
+            log.info("call-records/info: получено строк %d (окно %s .. %s)",
+                      len(rows), (last - timedelta(minutes=2)).isoformat(timespec="seconds"),
+                      end.isoformat(timespec="seconds"))
             for row in rows:
                 await handle_record(row)
             last = end
