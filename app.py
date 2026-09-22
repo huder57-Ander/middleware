@@ -346,22 +346,20 @@ async def handle_record(row: dict):
         
         # 3. Передаем recordUrl строкой и массивом для совместимости
         res = await ms("PUT", f"/call/extid/{call_obj.ext_id}", {
-            "recordUrl": url
+            "recordUrl": [url],  
         })
         log.info("запись %s прикреплена к звонку %s (status=%s)", name, call_obj.ext_id, getattr(res, 'status_code', None))
     else:
-        # Если не нашли активный звонок, создаем его целиком по данным записи
         log.info("запись %s: звонок не найден в памяти, создаю по записи", name)
         await ms("POST", "/call", {
-            "externalId": f"t2-rec-{name}", 
-            "number": plus(number), 
+            "externalId": f"t2-rec-{name}",
+            "number": plus(number),
             "extension": ext,
-            "isIncoming": incoming, 
+            "isIncoming": incoming,
             "startTime": ms_time(ts),
-            "endTime": ms_time(ts + timedelta(seconds=dur)), 
-            "recordUrl": url,
+            "endTime": ms_time(ts + timedelta(seconds=dur)),
+            "recordUrl": [url],   # было: "recordUrl": url
         })
-
     processed.append(name)
     save_processed()
 
