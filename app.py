@@ -284,7 +284,10 @@ def sign(name: str) -> str:
 
 
 def record_url(name: str) -> str:
-    return f"{PUBLIC_URL}/record/{quote(name, safe='')}?sig={sign(name)}"
+    # recordFileName у T2 содержит "/" (например "2022-08-12/mo_xxx") - оставляем
+    # его как обычный разделитель пути, а не %2F, иначе часть прокси/ASGI-цепочек
+    # декодирует %2F ещё до роутинга, и /record/{name} перестаёт совпадать (404)
+    return f"{PUBLIC_URL}/record/{quote(name, safe='/')}?sig={sign(name)}"
 
 
 def parse_ts(v) -> datetime:
@@ -481,7 +484,7 @@ async def call_request(request: Request):
 async def open_record(name: str) -> httpx.Response:
     for attempt in (1, 2):
         token = tokens.access
-        req = http.build_request("GET", f"{T2_BASE}/call-records/file/{quote(name, safe='')}",
+        req = http.build_request("GET", f"{T2_BASE}/call-records/file/{quote(name, safe='/')}",
                                  headers={"Authorization": token, "Accept": "*/*"})
         r = await http.send(req, stream=True)
         if r.status_code in (401, 403) and attempt == 1:
@@ -492,7 +495,7 @@ async def open_record(name: str) -> httpx.Response:
     raise RuntimeError("unreachable")
 
 
-@app.get("/record/{name}")
+@app.get("/record/{name:path}")
 async def record(name: str, sig: str):
     if not hmac.compare_digest(sig, sign(name)):
         raise HTTPException(403)
