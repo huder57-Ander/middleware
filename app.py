@@ -497,12 +497,17 @@ async def open_record(name: str) -> httpx.Response:
 
 @app.get("/record/{name:path}")
 async def record(name: str, sig: str):
+    log.info("запрос записи name=%r sig=%r", name, sig)
     if not hmac.compare_digest(sig, sign(name)):
-        raise HTTPException(403)
+        log.warning("запись %s: неверная подпись (ожидалась %s)", name, sign(name))
+        raise HTTPException(403, "bad signature")
     r = await open_record(name)
     if r.status_code != 200:
+        body = (await r.aread())[:300]
         await r.aclose()
-        raise HTTPException(404 if r.status_code == 404 else 502)
+        log.error("T2 отдал %s на файл записи %s: %s", r.status_code, name, body)
+        raise HTTPException(404 if r.status_code == 404 else 502,
+                             f"T2 status={r.status_code}")
     return StreamingResponse(r.aiter_bytes(),
                              media_type=r.headers.get("content-type", "audio/mpeg"),
                              background=BackgroundTask(r.aclose))
