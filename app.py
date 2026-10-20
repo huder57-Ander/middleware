@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -81,6 +82,13 @@ def plus(num) -> str | None:
 
 
 # ---------------------------------------------------------------- токены T2
+DEAD_TOKEN_RETRY_SEC = int(os.getenv("DEAD_TOKEN_RETRY_SEC", "600"))  # пауза между попытками при отказе refresh
+
+
+class T2AuthDead(RuntimeError):
+    """T2 не принимает ни access-, ни refresh-токен: без новых токенов из кабинета АТС всё равно не заработает."""
+
+
 class Tokens:
     """access живёт сутки, refresh 7 суток. Новую пару обязательно сохраняем на диск."""
 
@@ -89,6 +97,7 @@ class Tokens:
         self.refresh = os.getenv("T2_REFRESH_TOKEN", "")
         self.seed = self.refresh  # с какого токена из env начинали
         self.lock = asyncio.Lock()
+        self.dead_until = 0.0  # пока T2 отвергает refresh-токен, не долбим его запросами (см. refresh_now)
         if TOKEN_FILE.exists():
             try:
                 d = json.loads(TOKEN_FILE.read_text())
@@ -110,12 +119,23 @@ class Tokens:
         async with self.lock:
             if stale is not None and self.access != stale:
                 return  # уже обновили параллельным запросом
+            wait = self.dead_until - time.monotonic()
+            if wait > 0:
+                raise T2AuthDead(f"токены T2 недействительны, следующая попытка обновления через {int(wait)} с")
             r = await http.put(f"{T2_BASE}/authorization/refresh/token",
                                headers={"Authorization": self.refresh})
+            if r.status_code in (401, 403):
+                self.dead_until = time.monotonic() + DEAD_TOKEN_RETRY_SEC
+                log.error("T2 отклонил refresh-токен (HTTP %s): токены истекли или отозваны. Нужны НОВЫЕ токены: "
+                          "сгенерируйте пару access+refresh в кабинете АТС, пропишите T2_ACCESS_TOKEN и "
+                          "T2_REFRESH_TOKEN в переменных окружения и перезапустите сервис. "
+                          "Следующая попытка обновления - через %d мин.", r.status_code, DEAD_TOKEN_RETRY_SEC // 60)
+                raise T2AuthDead(f"T2 отклонил refresh-токен (HTTP {r.status_code})")
             r.raise_for_status()
             d = r.json()
             self.access = d["accessToken"]
             self.refresh = d.get("refreshToken") or self.refresh
+            self.dead_until = 0.0
             self.save()
             log.info("токены T2 обновлены")
 
@@ -256,6 +276,8 @@ async def poll_calls():
                     del live[key]
                     log.info("звонок завершён %s", call.ext_id)
                     await ms_finish(call)
+        except T2AuthDead:
+            await asyncio.sleep(30)  # причина уже в логе (раз в DEAD_TOKEN_RETRY_SEC)
         except Exception:
             log.exception("ошибка опроса /monitoring/calls")
             await asyncio.sleep(5)
@@ -390,6 +412,8 @@ async def poll_records():
             for row in rows:
                 await handle_record(row)
             last = end
+        except T2AuthDead:
+            pass  # причина уже в логе; окно запроса не сдвигаем - после восстановления токенов догоним
         except Exception:
             log.exception("ошибка опроса /call-records/info")
 
@@ -400,6 +424,8 @@ async def token_loop():
         await asyncio.sleep(12 * 3600)
         try:
             await tokens.refresh_now()
+        except T2AuthDead:
+            pass  # уже залогировано в refresh_now
         except Exception:
             log.exception("не удалось обновить токены T2 - сгенерируйте новые в кабинете АТС")
 
@@ -408,6 +434,9 @@ async def employees_loop():
     while True:
         try:
             await load_employees()
+        except T2AuthDead:
+            await asyncio.sleep(60)
+            continue
         except Exception:
             log.exception("не удалось загрузить сотрудников")
             await asyncio.sleep(15)
@@ -501,7 +530,10 @@ async def record(name: str, sig: str):
     if not hmac.compare_digest(sig, sign(name)):
         log.warning("запись %s: неверная подпись (ожидалась %s)", name, sign(name))
         raise HTTPException(403, "bad signature")
-    r = await open_record(name)
+    try:
+        r = await open_record(name)
+    except T2AuthDead:
+        raise HTTPException(503, "T2: токены недействительны, нужны новые (см. лог сервиса)")
     if r.status_code != 200:
         body = (await r.aread())[:300]
         await r.aclose()
