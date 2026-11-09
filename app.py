@@ -39,7 +39,11 @@ log = logging.getLogger("bridge")
 T2_BASE = os.getenv("T2_BASE", "https://ats2.t2.ru/crm/openapi")  # ats2.tele2.ru отдаёт 308 на t2.ru
 MS_BASE = "https://api.moysklad.ru/api/phone/1.0"
 MS_KEY = os.environ["MS_PHONE_KEY"]  # ключ из приложения Phone API в МоёмСкладе
-PUBLIC_URL = os.getenv("PUBLIC_URL", "https://moysklad-t2-andreihuder.amvera.io").rstrip("/")
+PUBLIC_URL = os.getenv("PUBLIC_URL", "https://moysklad-t2-andreihuder.amvera.io").strip().rstrip("/")
+if not re.match(r"^https?://", PUBLIC_URL, re.I):
+    # Без схемы МойСклад считает ссылку относительной и она не открывается - дописываем https://
+    logging.getLogger("bridge").warning("PUBLIC_URL=%r без https:// - дописываю автоматически; поправьте переменную", PUBLIC_URL)
+    PUBLIC_URL = "https://" + PUBLIC_URL.lstrip("/")
 RECORD_SECRET = os.getenv("RECORD_SECRET", MS_KEY)  # для подписи ссылок на записи
 TOKEN_FILE = Path(os.getenv("TOKEN_STORE_PATH", "t2_tokens.json"))
 PROCESSED_FILE = TOKEN_FILE.with_name("processed_records.json")
@@ -513,7 +517,10 @@ async def call_request(request: Request):
 async def open_record(name: str) -> httpx.Response:
     for attempt in (1, 2):
         token = tokens.access
-        req = http.build_request("GET", f"{T2_BASE}/call-records/file/{quote(name, safe='/')}",
+        # По документации T2: GET /call-records/file?filename=2022-07-15%2F165787002922476116
+        # (имя файла - ПАРАМЕТР запроса, "/" внутри него кодируется как %2F). Раньше здесь был
+        # путь /call-records/file/<имя>: такого маршрута у T2 нет, отсюда 404 на любой файл.
+        req = http.build_request("GET", f"{T2_BASE}/call-records/file?filename={quote(name, safe='')}",
                                  headers={"Authorization": token, "Accept": "*/*"})
         r = await http.send(req, stream=True)
         if r.status_code in (401, 403) and attempt == 1:
